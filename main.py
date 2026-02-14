@@ -3,6 +3,7 @@ import pprint
 import argparse
 import src.utils as utils
 import ipcalc
+import json
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--file', type=str, default='pfhq.yaml', help='Path to the YAML configuration file')
@@ -53,12 +54,79 @@ for tag, interfaces in tagstointerfaces.items(): # for each tag
                 })
 
 
-# create list of calls to make the p1 and p2 entries for each tunnel
-# I need to first go through and seperate the calls by firewall
-ipsectunnelcalls = {}
+# create list of tunnels to make the p1 and p2 entries for each tunnel
+# I need to first go through and seperate the tunnels by firewall
+ipsectunnelsbyfirewall = {}
 for firewall in data["firewalls"]:
-    ipsectunnelcalls[firewall["name"]] = []
-for tunnel in ipsectunnels:
-    
+    ipsectunnelsbyfirewall[firewall["name"]] = []
+pprint.pp(ipsectunnelsbyfirewall)
+ipsectunnelsjsoncalls = {firewall["name"]: [] for firewall in data["firewalls"]}
 
-pprint.pprint(ipsectunnels)
+for tunnel in ipsectunnels:
+    firewall1 = tunnel["interface1"]["firewall"]
+    firewall2 = tunnel["interface2"]["firewall"]
+    call1 = {
+        "name": tunnel["interface1"]["tunnel_name"],
+        "interface": tunnel["interface1"]["interface"],
+        "remote_gateway": tunnel["interface2"]["ip"],
+        "pre_shared_key": tunnel["secret"],
+        "tunnel_ip": tunnel["interface1"]["tunnel_ip"]
+    }
+    call2 = {
+        "name": tunnel["interface2"]["tunnel_name"],
+        "interface": tunnel["interface2"]["interface"],
+        "remote_gateway": tunnel["interface1"]["ip"],
+        "pre_shared_key": tunnel["secret"],
+        "tunnel_ip": tunnel["interface2"]["tunnel_ip"]
+    }
+    ipsectunnelsbyfirewall[firewall1].append(call1)
+    ipsectunnelsbyfirewall[firewall2].append(call2)
+
+# Theoretical json call for creating a p1 entry for a tunnel
+# {"disabled":false,"descr":"' + name + '","iketype":"ikev2","protocol":"inet","interface":"' + interface + '","remote_gateway":"' + remote_Gateway + '","authentication_method":"pre_shared_key","myid_type":"myaddress","peerid_type":"peeraddress","pre_shared_key":"' + pre_shared_key + '","encryption":{"item":[{"encryption_algorithm":{"name":"aes","keylen":"128"},"hash_algorithm":"sha256","dhgroup":"14"}]},"lifetime":28800,"nat_traversal":"on","mobike":"off","gw_duplicates":true,"prfselect_enable":false}
+# Needed variables are name, interface, remote_Gateway, pre_shared_key
+
+# turn the tunnels into json calls for creating p1 entries
+
+for firewall, tunnels in ipsectunnelsbyfirewall.items():
+    for tunnel in tunnels:
+        name = tunnel["name"]
+        interface = tunnel["interface"]
+        remote_Gateway = tunnel["remote_gateway"]
+        pre_shared_key = tunnel["pre_shared_key"]
+        json_call = {
+            "disabled": False,
+            "descr": name,
+            "iketype": data["ipsec"]["ike"],
+            "protocol": "inet",
+            "interface": interface,
+            "remote_gateway": remote_Gateway,
+            "authentication_method": "pre_shared_key",
+            "myid_type": "myaddress",
+            "peerid_type": "peeraddress",
+            "pre_shared_key": pre_shared_key,
+            "encryption": {
+                "item": [
+                    {
+                        "encryption_algorithm": {
+                            "name": "aes",
+                            "keylen": 128
+                        },
+                        "hash_algorithm": "sha256",
+                        "dhgroup": 14
+                    }
+                ]
+            },
+            "lifetime": 28800,
+            "nat_traversal": "on",
+            "mobike": "off",
+            "gw_duplicates": True,
+            "prfselect_enable": False
+        }
+        # print(json.dumps(json_call, indent=4))
+        pprint.pp(ipsectunnelsjsoncalls)
+        ipsectunnelsjsoncalls[firewall].append(json_call)
+        
+
+pprint.pprint(ipsectunnelsjsoncalls)
+
