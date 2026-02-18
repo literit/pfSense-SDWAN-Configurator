@@ -303,6 +303,11 @@ def build_device_children(sessionClient):
     
 
 def turn_on_ipsec_tunnels(device_children):
+    """Turns on the IPSec tunnels on the devices by ensuring that the necessary interfaces are enabled. It retrieves the interface descriptors for each device, identifies the IPSec-related interfaces, and checks if they are already present in the device's interfaces. If any IPSec interfaces are missing, it creates and enables them using the API.
+    
+    Args:
+        device_children (dict): A dictionary mapping device names to child API clients, allowing for interaction with each device to manage interfaces and configurations.
+    """
     for child in device_children.items():
         descriptors = child.call(get_interface_descriptors.sync).to_dict()["descriptors"]["physical"]
         ipsec_descriptors = {k: v for k, v in descriptors.items() if k.startswith("ipsec")}
