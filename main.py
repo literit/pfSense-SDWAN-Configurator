@@ -11,7 +11,7 @@ from pprint import pprint
 from pfapi.models import *
 from pfapi.api.vpn import set_ip_sec_phase_1, set_ip_sec_phase_2
 from pfapi.api.mim import get_controlled_devices
-from pfapi.api.interfaces import get_interfaces
+from pfapi.api.interfaces import get_interfaces, get_interface_descriptors, add_interface
 
 def parse_args():
     """
@@ -286,22 +286,6 @@ def apply_tunnels_to_devices(device_children, ipsectunnelcalls, tunnel_index):
 
 
 
-def get_ipsec_interfaces(device_children):
-    """Retrieves the list of IPSec interfaces per device and returns a dictionary mapping each device name to a list of its IPSec interfaces and their status.
-
-    Args:
-        device_children (dict): A dictionary mapping device names to child API clients used to query interface information on each device.
-    Returns:
-        dict: A dictionary mapping each device name to a list of its IPSec interfaces and their status.
-    """
-    ipsec_interfaces = {}
-    for device_name, child in device_children.items():
-        response = child.call(get_interfaces.sync).to_dict()
-        # pprint.pp(response)
-
-    return ipsec_interfaces
-
-
 def build_device_children(sessionClient):
     """Builds a mapping of device names to child API clients for controlled devices.
 
@@ -316,7 +300,20 @@ def build_device_children(sessionClient):
         if device.device_id != "localhost":
             device_children[device.name] = sessionClient.createDeviceApiChild(device_id=device.device_id)
     return device_children
+    
 
+def turn_on_ipsec_tunnels(device_children):
+    for child in device_children.items():
+        descriptors = child.call(get_interface_descriptors.sync).to_dict()["descriptors"]["physical"]
+        ipsec_descriptors = {k: v for k, v in descriptors.items() if k.startswith("ipsec")}
+        interfaces = child.call(get_interfaces.sync).to_dict()["interfaces"]
+        interfaces_to_be_made = [descriptor for descriptor in ipsec_descriptors.keys() if descriptor not in [interface["if"] for interface in interfaces]]
+        for interface in interfaces_to_be_made:
+            new_interface = Interface()
+            new_interface.if_ = interface
+            new_interface.enable = True
+            child.call(add_interface.sync, body=new_interface)
+        
 
 def main():
     """Main function to orchestrate the workflow of loading configuration, building tunnels, and applying them to devices via the API."""
@@ -343,7 +340,10 @@ def main():
         sys.exit(1)
 
     device_children = build_device_children(sessionClient)
+    
     apply_tunnels_to_devices(device_children, ipsectunnelcalls, tunnel_index)
+    
+    turn_on_ipsec_tunnels(device_children)
 
     # Stop the refresh timer to exit; otherwise it will wait until the timer event happens.
     sessionClient.stop()
