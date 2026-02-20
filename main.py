@@ -14,6 +14,7 @@ from pfapi.models import *
 from pfapi.api.vpn import set_ip_sec_phase_1, set_ip_sec_phase_2
 from pfapi.api.mim import get_controlled_devices
 from pfapi.api.interfaces import get_interfaces, get_interface_descriptors, add_interface
+from pfapi.api.system import apply_dirty_config
 
 # Configure logging
 logging.basicConfig(
@@ -550,6 +551,31 @@ def turn_on_ipsec_tunnels(device_children: Dict[str, Any], dry_run: bool = False
         except Exception as e:
             logging.error(f"Error enabling IPSec interfaces on {device_name}: {e}")
             raise
+       
+       
+def apply_changes_to_all_devices(device_children: Dict[str, Any], dry_run: bool = False) -> None:
+    """Applies pending changes to all devices to activate the new configurations.
+    
+    Args:
+        device_children: Mapping of device names to child API clients.
+        dry_run: If True, skip actual API calls.
+    """
+    body = ApplyDirtyConfigRequest()
+    ApplyDirtyConfigRequest.apply = True
+    for device_name, child in device_children.items():
+        try:
+            logging.info(f"Applying changes on device: {device_name}")
+            
+            if dry_run:
+                logging.info(f"[DRY RUN] Would apply changes on {device_name}")
+                continue
+            
+            child.call(apply_dirty_config.sync, body=body)
+            logging.info(f"Changes applied successfully on {device_name}")
+            
+        except Exception as e:
+            logging.error(f"Error applying changes on {device_name}: {e}")
+            raise
         
 
 def main() -> None:
@@ -608,6 +634,7 @@ def main() -> None:
         device_children = build_device_children(sessionClient)
         apply_tunnels_to_devices(device_children, ipsectunnelcalls, tunnel_index, args.dry_run)
         turn_on_ipsec_tunnels(device_children, args.dry_run)
+        apply_changes_to_all_devices(device_children, args.dry_run)
 
         # Stop the refresh timer to exit cleanly
         sessionClient.stop()
