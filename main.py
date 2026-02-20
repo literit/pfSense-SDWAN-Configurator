@@ -1,10 +1,12 @@
 # Import libraries for configuration, API interaction, and network calculations
 import yaml
 import argparse
+import logging
 import src.utils as utils
 from src.helper_funcs import *
 import ipcalc
 import sys
+from typing import Dict, List, Set, Any, Tuple
 from pprint import pprint
 
 # Import pfSense API models and methods for IPSec and device management
@@ -13,67 +15,134 @@ from pfapi.api.vpn import set_ip_sec_phase_1, set_ip_sec_phase_2
 from pfapi.api.mim import get_controlled_devices
 from pfapi.api.interfaces import get_interfaces, get_interface_descriptors, add_interface
 
-def parse_args():
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+def parse_args() -> argparse.Namespace:
     """
     Parses command line arguments.
+    
+    Returns:
+        argparse.Namespace: Parsed command line arguments.
     """
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--file', type=str, default='pfhq.yaml', help='Path to the YAML configuration file')
-    parser.add_argument('--state_file', type=str, default='pfhq.data', help='Path to the state file')
-    parser.add_argument('--dry_run', action='store_true', help='Perform a dry run without making API calls')
+    parser = argparse.ArgumentParser(
+        description='Configure pfSense SD-WAN IPSec tunnels based on YAML configuration'
+    )
+    parser.add_argument(
+        '--file', 
+        type=str, 
+        default='pfhq.yaml', 
+        help='Path to the YAML configuration file'
+    )
+    parser.add_argument(
+        '--state_file', 
+        type=str, 
+        default='pfhq.data', 
+        help='Path to the state file'
+    )
+    parser.add_argument(
+        '--dry_run', 
+        action='store_true', 
+        help='Perform a dry run without making API calls'
+    )
     return parser.parse_args()
 
 
-def load_config(yaml_file):
-    """ Loads the YAML configuration file and returns it as a Python dictionary.
+def load_config(yaml_file: str) -> Dict[str, Any]:
+    """Loads the YAML configuration file and returns it as a Python dictionary.
     
     Args:
-        yaml_file (str): The path to the YAML configuration file.
+        yaml_file: The path to the YAML configuration file.
+        
     Returns:
-        dict: The loaded configuration data as a Python dictionary.
+        The loaded configuration data as a Python dictionary.
+        
+    Raises:
+        FileNotFoundError: If the YAML file doesn't exist.
+        yaml.YAMLError: If the YAML file is malformed.
     """
-    with open(yaml_file, 'r') as file:
-        return yaml.safe_load(file)
+    try:
+        logging.info(f"Loading configuration from {yaml_file}")
+        with open(yaml_file, 'r') as file:
+            config = yaml.safe_load(file)
+            validate_config(config)
+            return config
+    except FileNotFoundError:
+        logging.error(f"Configuration file not found: {yaml_file}")
+        raise
+    except yaml.YAMLError as e:
+        logging.error(f"Error parsing YAML file: {e}")
+        raise
 
 
-def build_settings(data):
-    """ Builds the settings object for API interaction based on the loaded YAML data.
+def validate_config(config: Dict[str, Any]) -> None:
+    """Validates the configuration structure.
     
     Args:
-        data (dict): The loaded configuration data from the YAML file.
+        config: The loaded configuration data.
+        
+    Raises:
+        ValueError: If required fields are missing.
+    """
+    required_fields = ['api_server', 'firewalls', 'tunnels_network', 'hint_prefix', 'ipsec']
+    missing_fields = [field for field in required_fields if field not in config]
+    
+    if missing_fields:
+        raise ValueError(f"Missing required configuration fields: {', '.join(missing_fields)}")
+    
+    if not config['firewalls']:
+        raise ValueError("At least one firewall must be defined")
+    
+    logging.info("Configuration validation passed")
+
+
+def build_settings(data: Dict[str, Any]) -> Settings:
+    """Builds the settings object for API interaction based on the loaded YAML data.
+    
+    Args:
+        data: The loaded configuration data from the YAML file.
+        
     Returns:
-        Settings: A settings object configured for API interaction.
+        A settings object configured for API interaction.
     """
     # If USER environment variable is not set, it defaults to admin.
     # CONTROLLER_URL cannot have a trailing slash, otherwise the API calls will fail.
     settings = get_settings()
-    settings.CONTROLLER_URL = "https://" + data["api_server"] + ":" + "8443"
+    settings.CONTROLLER_URL = f"https://{data['api_server']}:8443"
+    logging.info(f"Configured controller URL: {settings.CONTROLLER_URL}")
     return settings
 
 
-def collect_tags(data):
+def collect_tags(data: Dict[str, Any]) -> Set[str]:
     """Collects all unique tags from the interfaces defined in the configuration data.
     
     Args:
-        data (dict): The loaded configuration data from the YAML file.
+        data: The loaded configuration data from the YAML file.
+        
     Returns:
-        set: A set of unique tags found across all interfaces in the configuration.
+        A set of unique tags found across all interfaces in the configuration.
     """
     tags = set()
     for firewall in data["firewalls"]:
         for interface in firewall["interfaces"]:
             tags.update(interface["tags"])
+    
+    logging.info(f"Collected {len(tags)} unique tags: {', '.join(sorted(tags))}")
     return tags
 
 
-def build_tag_interface_map(data, tags):
+def build_tag_interface_map(data: Dict[str, Any], tags: Set[str]) -> Dict[str, List[Dict[str, str]]]:
     """Builds a mapping of tags to the interfaces that use them.
     
     Args:
-        data (dict): The loaded configuration data from the YAML file.
-        tags (set): A set of unique tags found across all interfaces in the configuration.
+        data: The loaded configuration data from the YAML file.
+        tags: A set of unique tags found across all interfaces in the configuration.
+        
     Returns:
-        dict: A dictionary mapping each tag to a list of interfaces that use it.
+        A dictionary mapping each tag to a list of interfaces that use it.
     """
     tagstointerfaces = {tag: [] for tag in tags}
     for firewall in data["firewalls"]:
@@ -85,21 +154,38 @@ def build_tag_interface_map(data, tags):
                         "interface": interface["name"],
                         "ip": interface["ip"]
                     })
+    
+    for tag, interfaces in tagstointerfaces.items():
+        logging.debug(f"Tag '{tag}' has {len(interfaces)} interfaces")
+    
     return tagstointerfaces
 
 
-def build_ipsec_tunnels(tagstointerfaces, tunnels_network, hint_prefix):
-    """Builds a list of IPSec tunnels based on the mapping of tags to interfaces. For each tag, it creates tunnels between all pairs of interfaces that share that tag, ensuring that tunnels are only created between interfaces on different firewalls. Each tunnel is assigned a unique name and IP address from the specified tunnel network.
+def build_ipsec_tunnels(
+    tagstointerfaces: Dict[str, List[Dict[str, str]]], 
+    tunnels_network: str, 
+    hint_prefix: str
+) -> List[Dict[str, Any]]:
+    """Builds a list of IPSec tunnels based on the mapping of tags to interfaces.
+    
+    For each tag, it creates tunnels between all pairs of interfaces that share that tag,
+    ensuring that tunnels are only created between interfaces on different firewalls.
+    Each tunnel is assigned a unique name and IP address from the specified tunnel network.
     
     Args:
-        tagstointerfaces (dict): A dictionary mapping each tag to a list of interfaces that use it.
-        tunnels_network (str): The network range to use for assigning tunnel IP addresses.
-        hint_prefix (str): A prefix to use in the tunnel names for identification.
+        tagstointerfaces: A dictionary mapping each tag to a list of interfaces that use it.
+        tunnels_network: The network range to use for assigning tunnel IP addresses.
+        hint_prefix: A prefix to use in the tunnel names for identification.
+        
     Returns:
-        list: A list of dictionaries, each representing an IPSec tunnel with its associated interfaces and configuration details.
+        A list of dictionaries, each representing an IPSec tunnel with its associated
+        interfaces and configuration details.
     """
     ipsectunnels = []
     ipcounter = 0
+    
+    logging.info(f"Building IPSec tunnels from network {tunnels_network}")
+    
     for tag, interfaces in tagstointerfaces.items():
         for i in range(len(interfaces)):
             for j in range(i + 1, len(interfaces)):
@@ -125,19 +211,31 @@ def build_ipsec_tunnels(tagstointerfaces, tunnels_network, hint_prefix):
                         "interface2": interface2,
                         "secret": utils.generate_random_password(24),
                     })
+    
+    logging.info(f"Created {len(ipsectunnels)} IPSec tunnel configurations")
     return ipsectunnels
 
 
-def build_tunnel_calls(ipsectunnels, firewalls):
-    """Organizes the IPSec tunnels by firewall to simplify API calls. For each tunnel, it creates two call objects (one for each firewall) with the necessary details for configuring the tunnel on that firewall. The resulting structure is a dictionary mapping each firewall name to a list of tunnel call objects that need to be applied to that firewall.
+def build_tunnel_calls(
+    ipsectunnels: List[Dict[str, Any]], 
+    firewalls: List[Dict[str, Any]]
+) -> Dict[str, List[Dict[str, str]]]:
+    """Organizes the IPSec tunnels by firewall to simplify API calls.
+    
+    For each tunnel, it creates two call objects (one for each firewall) with the
+    necessary details for configuring the tunnel on that firewall. The resulting
+    structure is a dictionary mapping each firewall name to a list of tunnel call
+    objects that need to be applied to that firewall.
     
     Args:
-        ipsectunnels (list): A list of dictionaries, each representing an IPSec tunnel with its associated interfaces and configuration details.
-        firewalls (list): A list of firewall configurations from the loaded YAML data, each containing the firewall name and its interfaces.
+        ipsectunnels: A list of dictionaries, each representing an IPSec tunnel.
+        firewalls: A list of firewall configurations from the loaded YAML data.
+        
     Returns:
-        dict: A dictionary mapping each firewall name to a list of tunnel call objects that need to be applied to that firewall for configuring the IPSec tunnels.
+        A dictionary mapping each firewall name to a list of tunnel call objects.
     """
     ipsectunnelsbyfirewall = {firewall["name"]: [] for firewall in firewalls}
+    
     for tunnel in ipsectunnels:
         firewall1 = tunnel["interface1"]["firewall"]
         firewall2 = tunnel["interface2"]["firewall"]
@@ -161,18 +259,27 @@ def build_tunnel_calls(ipsectunnels, firewalls):
 
         ipsectunnelsbyfirewall[firewall1].append(call1)
         ipsectunnelsbyfirewall[firewall2].append(call2)
+    
+    for fw, tunnels in ipsectunnelsbyfirewall.items():
+        logging.debug(f"Firewall '{fw}' has {len(tunnels)} tunnels")
+    
     return ipsectunnelsbyfirewall
 
 
-def make_ipsec_phases(tunnel, ike_version):
-    """Creates a Phase 1 configuration object for a given tunnel and IKE version. The configuration is based on consistent defaults for all tunnels, with specific details filled in from the tunnel information. This includes settings for authentication, encryption, lifetime, and other parameters necessary for establishing the IPSec tunnel.
+def make_ipsec_phases(tunnel: Dict[str, str], ike_version: str) -> Tuple[Phase1, Phase2]:
+    """Creates Phase 1 and Phase 2 configuration objects for a given tunnel.
+    
+    The configuration is based on consistent defaults for all tunnels, with specific
+    details filled in from the tunnel information. This includes settings for
+    authentication, encryption, lifetime, and other parameters necessary for
+    establishing the IPSec tunnel.
     
     Args:
-        tunnel (dict): A dictionary containing the details of the tunnel, including its name, interface, remote gateway, and pre-shared key.
-        ike_version (str): The IKE version to use for the Phase 1 configuration (e.g., "ikev2").
+        tunnel: A dictionary containing the tunnel details.
+        ike_version: The IKE version to use (e.g., "ikev2").
+        
     Returns:
-        Phase1: A Phase1 object configured with the appropriate settings for the given tunnel and IKE version, ready to be applied to the firewall via the API.
-        Phase2: A Phase2 object configured with the appropriate settings for the given tunnel, ready to be applied to the firewall via the API.
+        A tuple of (Phase1, Phase2) objects configured for the tunnel.
     """
     phase1 = Phase1(iketype=ike_version)
     phase1.disabled = False
@@ -195,21 +302,37 @@ def make_ipsec_phases(tunnel, ike_version):
     phase1.dpd_delay = 10
     phase1.dpd_maxfail = 5
 
-    encryption_dict = {'item': [{'dhgroup': '14',
-                         'encryption_algorithm': {'keylen': '128',
-                                                  'name': 'aes'},
-                         'hash_algorithm': 'sha256'}]}
+    encryption_dict = {
+        'item': [{
+            'dhgroup': '14',
+            'encryption_algorithm': {'keylen': '128', 'name': 'aes'},
+            'hash_algorithm': 'sha256'
+        }]
+    }
     phase1.encryption = Phase1Encryption.from_dict(encryption_dict)
     
     phase2 = Phase2()
-    # ikeid is the one that is needed to link phase 2 to phase 1, but it is not known until phase 1 is applied and the API response is received with the assigned ike_id. This will be updated in the tunnel index after applying phase 1.
+    # ikeid links phase 2 to phase 1, but it is not known until phase 1 is applied
+    # and the API response is received with the assigned ike_id.
+    # This will be updated in the tunnel index after applying phase 1.
     phase2.mode = "vti"
-    localid_dict = {'type': 'network', 'address': ipcalc.IP(tunnel["tunnel_ip"]).dq, 'netbits': "31"}
+    localid_dict = {
+        'type': 'network',
+        'address': ipcalc.IP(tunnel["tunnel_ip"]).dq,
+        'netbits': "31"
+    }
     phase2.localid = Phase2LocalId.from_dict(localid_dict)
-    remoteid_dict = {'type': 'network', 'address': ipcalc.IP(tunnel["remote_tunnel_ip"]).dq, 'netbits': "31"}
+    remoteid_dict = {
+        'type': 'network',
+        'address': ipcalc.IP(tunnel["remote_tunnel_ip"]).dq,
+        'netbits': "31"
+    }
     phase2.remoteid = Phase2RemoteId.from_dict(remoteid_dict)
     phase2.protocol = "esp"
-    phase2.encryption_algorithm_option = [EncryptionAlgorithm.from_dict({"name": "aes", "keylen": "128"}), EncryptionAlgorithm.from_dict({"name": "aes128gcm", "keylen": "128"})]
+    phase2.encryption_algorithm_option = [
+        EncryptionAlgorithm.from_dict({"name": "aes", "keylen": "128"}),
+        EncryptionAlgorithm.from_dict({"name": "aes128gcm", "keylen": "128"})
+    ]
     phase2.hash_algorithm_option = ["hmac_sha256"]
     phase2.pfsgroup = "14"
     phase2.lifetime = 3600  # 1 hour
@@ -220,38 +343,51 @@ def make_ipsec_phases(tunnel, ike_version):
     phase2.mobile = False
     phase2.disabled = False
     phase2.descr = tunnel["name"]
+    
     return phase1, phase2
 
 
-def build_ipsec_calls(ipsectunnelsbyfirewall, ike_version, tunnel_index):
-    """Builds Phase 1 and Phase 2 configuration objects for all tunnels, organized by firewall.
+def build_ipsec_calls(
+    ipsectunnelsbyfirewall: Dict[str, List[Dict[str, str]]],
+    ike_version: str,
+    tunnel_index: Dict[str, Dict[str, Any]]
+) -> Tuple[Dict[str, List[Phase1]], Dict[str, Dict[str, Any]]]:
+    """Builds Phase 1 and Phase 2 configuration objects for all tunnels.
     
     Args:
-        ipsectunnelsbyfirewall (dict): A dictionary mapping each firewall name to a list of tunnel call details that need to be applied to that firewall.
-        ike_version (str): The IKE version to use for all Phase 1 configurations (e.g., "ikev2").
-        tunnel_index (dict): A dictionary mapping each firewall name to a dictionary of tunnel names to tunnel details, allowing for quick lookup of tunnels by firewall and name. This will be updated with the assigned IKE IDs after applying Phase 1 configurations.
+        ipsectunnelsbyfirewall: Mapping of firewall names to tunnel call details.
+        ike_version: The IKE version to use for all Phase 1 configurations.
+        tunnel_index: Mapping of firewall names to tunnel details for quick lookup.
+        
     Returns:
-        ipsectunnelcalls (dict): A dictionary mapping each firewall name to a list of Phase 1 configuration objects that need to be applied to that firewall for configuring the IPSec tunnels. Each Phase 1 object is created based on the corresponding tunnel details and the specified IKE version, ready to be applied to the firewall via the API.
-        tunnel_index (dict): A dictionary mapping each firewall name to a dictionary of tunnel names to tunnel details, including the Phase 2 configuration objects, allowing for quick lookup of tunnels by firewall and name.
+        A tuple of (ipsectunnelcalls, tunnel_index) where:
+        - ipsectunnelcalls: Mapping of firewall names to Phase 1 configuration objects
+        - tunnel_index: Updated tunnel index including Phase 2 configuration objects
     """
     # Prepare Phase 1 objects per firewall.
     ipsectunnelcalls = {firewall: [] for firewall in ipsectunnelsbyfirewall}
+    
     for firewall, tunnels in ipsectunnelsbyfirewall.items():
         for tunnel in tunnels:
             phase1, phase2 = make_ipsec_phases(tunnel, ike_version)
             ipsectunnelcalls[firewall].append(phase1)
             tunnel_index[firewall][tunnel["name"]]["phase2"] = phase2
+    
+    logging.info("Built IPSec Phase 1 and Phase 2 configurations")
     return ipsectunnelcalls, tunnel_index
 
 
-def build_tunnel_index(ipsectunnelsbyfirewall):
+def build_tunnel_index(
+    ipsectunnelsbyfirewall: Dict[str, List[Dict[str, str]]]
+) -> Dict[str, Dict[str, Dict[str, str]]]:
     """Builds an index for quick lookup of tunnels by firewall name and description.
 
     Args:
-        ipsectunnelsbyfirewall (dict): A dictionary mapping each firewall name to a list of tunnel call details that need to be applied to that firewall.
+        ipsectunnelsbyfirewall: Mapping of firewall names to tunnel call details.
 
     Returns:
-        dict: A dictionary mapping each firewall name to a dictionary of tunnel names to tunnel details, allowing for quick lookup of tunnels by firewall and name.
+        A dictionary mapping each firewall name to a dictionary of tunnel names
+        to tunnel details.
     """
     return {
         fw: {t["name"]: t for t in tunnels}
@@ -259,99 +395,233 @@ def build_tunnel_index(ipsectunnelsbyfirewall):
     }
 
 
-def apply_tunnels_to_devices(device_children, ipsectunnelcalls, tunnel_index):
-    """Applies Phase 1 tunnel configurations to devices. Maps interface identities for each device, and then pushes the Phase 1 configurations to the appropriate devices based on the firewall they belong to. After applying each Phase 1 configuration, it extracts the assigned IKE ID from the API response and updates the tunnel index for reference in later steps (such as configuring Phase 2).
+def apply_tunnels_to_devices(
+    device_children: Dict[str, Any],
+    ipsectunnelcalls: Dict[str, List[Phase1]],
+    tunnel_index: Dict[str, Dict[str, Any]],
+    dry_run: bool = False
+) -> None:
+    """Applies Phase 1 and Phase 2 tunnel configurations to devices.
+    
+    Maps interface identities for each device, then pushes the Phase 1 and Phase 2
+    configurations to the appropriate devices based on the firewall they belong to.
+    After applying each Phase 1 configuration, it extracts the assigned IKE ID from
+    the API response and updates the tunnel index for reference in Phase 2.
     
     Args:
-        device_children (dict): A dictionary mapping device names to child API clients.
-        ipsectunnelcalls (dict): A dictionary mapping each firewall name to a list of Phase 1 configuration objects that need to be applied to that firewall for configuring the IPSec tunnels.
-        tunnel_index (dict): A dictionary mapping each firewall name to a dictionary of tunnel names to tunnel details, allowing for quick lookup of tunnels by firewall and name.
+        device_children: Mapping of device names to child API clients.
+        ipsectunnelcalls: Mapping of firewall names to Phase 1 configurations.
+        tunnel_index: Mapping of firewall names to tunnel details.
+        dry_run: If True, skip actual API calls.
     """
     interfacestoidentity = {}
 
     for device_name, child in device_children.items():
-        if device_name in ipsectunnelcalls:
+        if device_name not in ipsectunnelcalls:
+            logging.debug(f"No tunnels configured for device '{device_name}'")
+            continue
+        
+        try:
+            logging.info(f"Processing device: {device_name}")
+            
+            if dry_run:
+                logging.info(f"[DRY RUN] Would fetch interfaces for {device_name}")
+                logging.info(f"[DRY RUN] Would apply {len(ipsectunnelcalls[device_name])} tunnels to {device_name}")
+                continue
+            
+            # Fetch interface mappings
             response = child.call(get_interfaces.sync).to_dict()
+            interfacestoidentity[device_name] = {
+                interface['assigned']: interface['identity']
+                for interface in response['interfaces']
+            }
 
-            interfacestoidentity[device_name] = {}
-            for interface in response['interfaces']:
-                interfacestoidentity[device_name][interface['assigned']] = interface['identity']
-
+            # Apply Phase 1 configurations
             for tunnel in ipsectunnelcalls[device_name]:
                 tunnel.interface = interfacestoidentity[device_name][tunnel.interface]
+                tunnel_name = str(tunnel.descr) if tunnel.descr else ""
+                logging.info(f"Applying Phase 1 for tunnel: {tunnel_name}")
+                
                 response = child.call(set_ip_sec_phase_1.sync, body=tunnel).to_dict()
-                tunnel_index[device_name][tunnel.descr]["phase2"].ikeid = response['msg'].split("Phase1 ", 1)[1].split(None, 1)[0]
-            for tunnel in tunnel_index[device_name]:
-                response = child.call(set_ip_sec_phase_2.sync, body=tunnel_index[device_name][tunnel]["phase2"])
+                
+                # Extract IKE ID from response
+                ike_id = response['msg'].split("Phase1 ", 1)[1].split(None, 1)[0]
+                tunnel_index[device_name][tunnel_name]["phase2"].ikeid = ike_id
+                logging.debug(f"Assigned IKE ID {ike_id} to tunnel {tunnel_name}")
+            
+            # Apply Phase 2 configurations
+            for tunnel_name in tunnel_index[device_name]:
+                logging.info(f"Applying Phase 2 for tunnel: {tunnel_name}")
+                phase2 = tunnel_index[device_name][tunnel_name]["phase2"]
+                child.call(set_ip_sec_phase_2.sync, body=phase2)
+            
+            logging.info(f"Successfully configured {len(ipsectunnelcalls[device_name])} tunnels on {device_name}")
+            
+        except Exception as e:
+            logging.error(f"Error applying tunnels to device {device_name}: {e}")
+            raise
 
 
 
-def build_device_children(sessionClient):
+def build_device_children(sessionClient: Any) -> Dict[str, Any]:
     """Builds a mapping of device names to child API clients for controlled devices.
 
     Args:
-        sessionClient (RequestClient): An authenticated API client for interacting with the pfSense controller.
+        sessionClient: An authenticated API client for the pfSense controller.
+        
     Returns:
-        dict: A dictionary mapping device names to child API clients.
+        A dictionary mapping device names to child API clients.
+        
+    Raises:
+        Exception: If no online devices are found.
     """
-    online_devices = sessionClient.call(get_controlled_devices.sync)
-    device_children = {}
-    for device in online_devices.devices:
-        if device.device_id != "localhost":
-            device_children[device.name] = sessionClient.createDeviceApiChild(device_id=device.device_id)
-    return device_children
+    try:
+        logging.info("Fetching controlled devices...")
+        online_devices = sessionClient.call(get_controlled_devices.sync)
+        
+        device_children = {}
+        for device in online_devices.devices:
+            if device.device_id != "localhost":
+                logging.info(f"Found device: {device.name} (ID: {device.device_id})")
+                device_children[device.name] = sessionClient.createDeviceApiChild(
+                    device_id=device.device_id
+                )
+        
+        if not device_children:
+            raise Exception("No online devices found (excluding localhost)")
+        
+        logging.info(f"Successfully connected to {len(device_children)} device(s)")
+        return device_children
+        
+    except Exception as e:
+        logging.error(f"Error building device children: {e}")
+        raise
     
 
-def turn_on_ipsec_tunnels(device_children):
-    """Turns on the IPSec tunnels on the devices by ensuring that the necessary interfaces are enabled. It retrieves the interface descriptors for each device, identifies the IPSec-related interfaces, and checks if they are already present in the device's interfaces. If any IPSec interfaces are missing, it creates and enables them using the API.
+def turn_on_ipsec_tunnels(device_children: Dict[str, Any], dry_run: bool = False) -> None:
+    """Turns on the IPSec tunnels on the devices by ensuring necessary interfaces are enabled.
+    
+    It retrieves the interface descriptors for each device, identifies the IPSec-related
+    interfaces, and checks if they are already present in the device's interfaces. If any
+    IPSec interfaces are missing, it creates and enables them using the API.
     
     Args:
-        device_children (dict): A dictionary mapping device names to child API clients, allowing for interaction with each device to manage interfaces and configurations.
+        device_children: Mapping of device names to child API clients.
+        dry_run: If True, skip actual API calls.
     """
-    for child in device_children.items():
-        descriptors = child.call(get_interface_descriptors.sync).to_dict()["descriptors"]["physical"]
-        ipsec_descriptors = {k: v for k, v in descriptors.items() if k.startswith("ipsec")}
-        interfaces = child.call(get_interfaces.sync).to_dict()["interfaces"]
-        interfaces_to_be_made = [descriptor for descriptor in ipsec_descriptors.keys() if descriptor not in [interface["if"] for interface in interfaces]]
-        for interface in interfaces_to_be_made:
-            new_interface = Interface()
-            new_interface.if_ = interface
-            new_interface.enable = True
-            child.call(add_interface.sync, body=new_interface)
+    for device_name, child in device_children.items():
+        try:
+            logging.info(f"Enabling IPSec interfaces on device: {device_name}")
+            
+            if dry_run:
+                logging.info(f"[DRY RUN] Would enable IPSec interfaces on {device_name}")
+                continue
+            
+            # Get physical descriptors
+            descriptors = child.call(get_interface_descriptors.sync).to_dict()["descriptors"]["physical"]
+            ipsec_descriptors = {
+                k: v for k, v in descriptors.items() if k.startswith("ipsec")
+            }
+            
+            # Get current interfaces
+            interfaces = child.call(get_interfaces.sync).to_dict()["interfaces"]
+            existing_interface_names = [interface["if"] for interface in interfaces]
+            
+            # Determine which interfaces need to be created
+            interfaces_to_be_made = [
+                descriptor for descriptor in ipsec_descriptors.keys()
+                if descriptor not in existing_interface_names
+            ]
+            
+            if not interfaces_to_be_made:
+                logging.info(f"All IPSec interfaces already enabled on {device_name}")
+                continue
+            
+            # Create missing interfaces
+            for interface in interfaces_to_be_made:
+                logging.info(f"Creating interface: {interface}")
+                new_interface = Interface()
+                new_interface.if_ = interface
+                new_interface.enable = True
+                child.call(add_interface.sync, body=new_interface)
+            
+            logging.info(f"Created {len(interfaces_to_be_made)} IPSec interface(s) on {device_name}")
+            
+        except Exception as e:
+            logging.error(f"Error enabling IPSec interfaces on {device_name}: {e}")
+            raise
         
 
-def main():
-    """Main function to orchestrate the workflow of loading configuration, building tunnels, and applying them to devices via the API."""
-    args = parse_args()
-    data = load_config(args.file)
-    settings = build_settings(data)
+def main() -> None:
+    """Main function to orchestrate the workflow of loading configuration,
+    building tunnels, and applying them to devices via the API.
+    """
+    try:
+        args = parse_args()
+        
+        if args.dry_run:
+            logging.info("=" * 60)
+            logging.info("DRY RUN MODE - No changes will be made")
+            logging.info("=" * 60)
+        
+        # Load and validate configuration
+        data = load_config(args.file)
+        settings = build_settings(data)
 
-    tags = collect_tags(data)
-    tagstointerfaces = build_tag_interface_map(data, tags)
+        # Build tunnel configurations
+        tags = collect_tags(data)
+        tagstointerfaces = build_tag_interface_map(data, tags)
 
-    ipsectunnels = build_ipsec_tunnels(
-        tagstointerfaces,
-        data["tunnels_network"],
-        data["hint_prefix"],
-    )
-    ipsectunnelsbyfirewall = build_tunnel_calls(ipsectunnels, data["firewalls"])
-    tunnel_index = build_tunnel_index(ipsectunnelsbyfirewall)
-    ipsectunnelcalls, tunnel_index = build_ipsec_calls(ipsectunnelsbyfirewall, data["ipsec"]["ike"], tunnel_index)
+        ipsectunnels = build_ipsec_tunnels(
+            tagstointerfaces,
+            data["tunnels_network"],
+            data["hint_prefix"],
+        )
+        
+        ipsectunnelsbyfirewall = build_tunnel_calls(ipsectunnels, data["firewalls"])
+        tunnel_index = build_tunnel_index(ipsectunnelsbyfirewall)
+        ipsectunnelcalls, tunnel_index = build_ipsec_calls(
+            ipsectunnelsbyfirewall,
+            data["ipsec"]["ike"],
+            tunnel_index
+        )
 
-    # Initialize API client and authenticate with the pfSense controller.
-    sessionClient = RequestClient(controller_url=settings.CONTROLLER_URL)
-    if not sessionClient.login(settings.USER, settings.PASSWORD):
-        print("Login failed... quitting")
+        if args.dry_run:
+            logging.info("Configuration built successfully")
+            logging.info(f"Total tunnels to be created: {len(ipsectunnels)}")
+            for fw, tunnels in ipsectunnelsbyfirewall.items():
+                logging.info(f"  {fw}: {len(tunnels)} tunnels")
+            logging.info("Dry run complete - exiting without making API calls")
+            return
+
+        # Initialize API client and authenticate
+        logging.info("Initializing API client...")
+        sessionClient = RequestClient(controller_url=settings.CONTROLLER_URL)
+        
+        if not sessionClient.login(settings.USER, settings.PASSWORD):
+            logging.error("Login failed")
+            sys.exit(1)
+        
+        logging.info("Successfully authenticated")
+
+        # Build device clients and apply configurations
+        device_children = build_device_children(sessionClient)
+        apply_tunnels_to_devices(device_children, ipsectunnelcalls, tunnel_index, args.dry_run)
+        turn_on_ipsec_tunnels(device_children, args.dry_run)
+
+        # Stop the refresh timer to exit cleanly
+        sessionClient.stop()
+        
+        logging.info("=" * 60)
+        logging.info("Configuration completed successfully")
+        logging.info("=" * 60)
+        
+    except KeyboardInterrupt:
+        logging.warning("\nOperation cancelled by user")
+        sys.exit(130)
+    except Exception as e:
+        logging.error(f"Fatal error: {e}", exc_info=True)
         sys.exit(1)
-
-    device_children = build_device_children(sessionClient)
-    
-    apply_tunnels_to_devices(device_children, ipsectunnelcalls, tunnel_index)
-    
-    turn_on_ipsec_tunnels(device_children)
-
-    # Stop the refresh timer to exit; otherwise it will wait until the timer event happens.
-    sessionClient.stop()
 
 
 if __name__ == "__main__":
