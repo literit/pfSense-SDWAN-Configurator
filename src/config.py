@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
         help='Path to the state file'
     )
     parser.add_argument(
-        '--dry_run', 
+        '--dry-run', 
         action='store_true', 
         help='Perform a dry run without making API calls'
     )
@@ -98,6 +98,9 @@ def build_settings(data: Dict[str, Any]):
     # If USER environment variable is not set, it defaults to admin.
     # CONTROLLER_URL cannot have a trailing slash, otherwise the API calls will fail.
     settings = get_settings()
-    settings.CONTROLLER_URL = f"https://{data['api_server']}:8443"
+    if not data.get('api_port'):
+        logging.warning("API port not specified in configuration, defaulting to 8443")
+        data['api_port'] = 8443
+    settings.CONTROLLER_URL = f"https://{data['api_server']}:{data['api_port']}"
     logging.info(f"Configured controller URL: {settings.CONTROLLER_URL}")
     return settings

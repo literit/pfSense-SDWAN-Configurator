@@ -1,50 +1,38 @@
 """Tunnel building and infrastructure module."""
 
 import logging
-from typing import Dict, List, Set, Any
+from typing import Dict, List, Any
 
 import ipcalc
 import src.utils as utils
 
 
-def collect_tags(data: Dict[str, Any]) -> Set[str]:
-    """Collects all unique tags from the interfaces defined in the configuration data.
-    
-    Args:
-        data: The loaded configuration data from the YAML file.
-        
-    Returns:
-        A set of unique tags found across all interfaces in the configuration.
-    """
-    tags = set()
-    for firewall in data["firewalls"]:
-        for interface in firewall["interfaces"]:
-            tags.update(interface["tags"])
-    
-    logging.info(f"Collected {len(tags)} unique tags: {', '.join(sorted(tags))}")
-    return tags
-
-
-def build_tag_interface_map(data: Dict[str, Any], tags: Set[str]) -> Dict[str, List[Dict[str, str]]]:
+def build_tag_interface_map(data: Dict[str, Any]) -> Dict[str, List[Dict[str, str]]]:
     """Builds a mapping of tags to the interfaces that use them.
-    
+
     Args:
         data: The loaded configuration data from the YAML file.
-        tags: A set of unique tags found across all interfaces in the configuration.
-        
+
     Returns:
         A dictionary mapping each tag to a list of interfaces that use it.
     """
-    tagstointerfaces = {tag: [] for tag in tags}
+    tagstointerfaces: Dict[str, List[Dict[str, str]]] = {}
     for firewall in data["firewalls"]:
         for interface in firewall["interfaces"]:
-            for tag in tags:
-                if tag in interface["tags"]:
-                    tagstointerfaces[tag].append({
-                        "firewall": firewall["name"],
-                        "interface": interface["name"],
-                        "ip": interface["ip"]
-                    })
+            for tag in interface["tags"]:
+                if tag not in tagstointerfaces:
+                    tagstointerfaces[tag] = []
+                tagstointerfaces[tag].append({
+                    "firewall": firewall["name"],
+                    "interface": interface["name"],
+                    "ip": interface["ip"]
+                })
+
+    logging.info(
+        "Collected %d unique tags: %s",
+        len(tagstointerfaces),
+        ", ".join(sorted(tagstointerfaces.keys())),
+    )
     
     for tag, interfaces in tagstointerfaces.items():
         logging.debug(f"Tag '{tag}' has {len(interfaces)} interfaces")
@@ -52,6 +40,27 @@ def build_tag_interface_map(data: Dict[str, Any], tags: Set[str]) -> Dict[str, L
     return tagstointerfaces
 
 
+def create_tunnel_name(
+    hint_prefix: str,
+    interface_name: str,
+    remote_firewall: str,
+    remote_interface: str
+) -> str:
+    """Creates a unique and descriptive name for an IPSec tunnel based on its details.
+
+    Args:
+        hint_prefix: A prefix to use in the tunnel name for identification.
+        interface_name: The name of the local interface involved in the tunnel.
+        remote_firewall: The name of the remote firewall on the other end of the tunnel.
+        remote_interface: The name of the remote interface involved in the tunnel.
+    
+    Returns:
+        A string representing the generated tunnel name.
+    """
+    return f"{hint_prefix}_{interface_name}-{remote_firewall}-{remote_interface}"
+
+
+# I could probably merge this and the next function into one. I 
 def build_ipsec_tunnels(
     tagstointerfaces: Dict[str, List[Dict[str, str]]], 
     tunnels_network: str, 
@@ -82,16 +91,20 @@ def build_ipsec_tunnels(
             for j in range(i + 1, len(interfaces)):
                 if interfaces[i]["firewall"] != interfaces[j]["firewall"]:
                     interface1 = dict(interfaces[i])
-                    interface1["tunnel_name"] = (
-                        f"{hint_prefix}_{interfaces[i]['interface']}"
-                        f"-{interfaces[j]['firewall']}-{interfaces[j]['interface']}"
+                    interface1["tunnel_name"] = create_tunnel_name(
+                        hint_prefix,
+                        interfaces[i]["interface"],
+                        interfaces[j]["firewall"],
+                        interfaces[j]["interface"]
                     )
                     interface1["tunnel_ip"] = str(ipcalc.Network(tunnels_network) + ipcounter)
 
                     interface2 = dict(interfaces[j])
-                    interface2["tunnel_name"] = (
-                        f"{hint_prefix}_{interfaces[j]['interface']}"
-                        f"-{interfaces[i]['firewall']}-{interfaces[i]['interface']}"
+                    interface2["tunnel_name"] = create_tunnel_name(
+                        hint_prefix,
+                        interfaces[j]["interface"],
+                        interfaces[i]["firewall"],
+                        interfaces[i]["interface"]
                     )
                     interface2["tunnel_ip"] = str(ipcalc.Network(tunnels_network) + ipcounter + 1)  # type: ignore
                     ipcounter += 2
@@ -155,6 +168,7 @@ def build_tunnel_calls(
         logging.debug(f"Firewall '{fw}' has {len(tunnels)} tunnels")
     
     return ipsectunnelsbyfirewall
+
 
 
 def build_tunnel_index(

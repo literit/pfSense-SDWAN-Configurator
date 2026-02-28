@@ -1,0 +1,18 @@
+anyio==4.12.1
+attrs==25.4.0
+certifi==2026.1.4
+h11==0.16.0
+http_client==0.1.22
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.11
+ipcalc==1.99.0
+# The following line isn't yet an actual package you can install regularly
+# It is located here
+# https://github.com/Netgate/pfsense-api/tree/main/py
+# It doesn't have an actual package yet
+# pf-sense-api-client @ file:///Users/urishechtergelles/Documents/pfSense-SDWAN-Configurator/vendor/pfsense-api/py
+pycurl==7.45.7
+python-dateutil==2.9.0.post0
+PyYAML==6.0.3
+six==1.17.0

@@ -4,7 +4,7 @@ import sys
 
 # Import configuration and setup modules
 from src.config import parse_args, load_config, build_settings
-from src.tunnels import collect_tags, build_tag_interface_map, build_ipsec_tunnels, build_tunnel_calls, build_tunnel_index
+from src.tunnels import build_tag_interface_map, build_ipsec_tunnels, build_tunnel_calls, build_tunnel_index
 from src.ipsec import build_ipsec_calls
 from src.devices import build_device_children, apply_tunnels_to_devices, turn_on_ipsec_tunnels, apply_changes_to_all_devices
 
@@ -33,8 +33,7 @@ def main() -> None:
         settings = build_settings(data)
 
         # Build tunnel configurations
-        tags = collect_tags(data)
-        tagstointerfaces = build_tag_interface_map(data, tags)
+        tagstointerfaces = build_tag_interface_map(data)
 
         ipsectunnels = build_ipsec_tunnels(
             tagstointerfaces,
