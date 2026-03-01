@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import json
 from ipaddress import ip_address, ip_network
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
+import pickle
 
 
 IPPair = Tuple[str, str]
@@ -31,9 +31,13 @@ class TunnelIpAllocator:
 
     @classmethod
     def import_db(cls, file_path: str) -> "TunnelIpAllocator":
-        """Load DB from JSON file and recreate in-memory indexes."""
+        """Load DB from Pickle file and recreate in-memory indexes."""
         path = Path(file_path)
-        data = json.loads(path.read_text())
+        with path.open("rb") as file:
+            data = pickle.load(file)
+
+        if not isinstance(data, dict):
+            raise ValueError("DB payload must be a dictionary")
 
         if data.get("version") != cls.DB_VERSION:
             raise ValueError(
@@ -76,7 +80,7 @@ class TunnelIpAllocator:
         return allocator
 
     def save_db(self, file_path: str) -> None:
-        """Persist DB to a JSON file."""
+        """Persist DB to a Pickle file."""
         path = Path(file_path)
         serializable = {
             tunnel_id: {"ip1": pair[0], "ip2": pair[1]}
@@ -87,7 +91,8 @@ class TunnelIpAllocator:
             "network": self.network_cidr,
             "allocations": serializable,
         }
-        path.write_text(json.dumps(data, indent=2, sort_keys=True))
+        with path.open("wb") as file:
+            pickle.dump(data, file)
 
     def alloc(self, tunnel_id: str) -> IPPair:
         """Allocate the next available IP-pair for a tunnel id.

@@ -1,4 +1,4 @@
-import json
+import pickle
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -65,7 +65,7 @@ class TunnelIpAllocatorTests(unittest.TestCase):
         self.db.alloc("t1")
 
         with TemporaryDirectory() as tmpdir:
-            db_path = Path(tmpdir) / "ipdb.json"
+            db_path = Path(tmpdir) / "ipdb.pkl"
             self.db.save_db(str(db_path))
 
             loaded = TunnelIpAllocator.import_db(str(db_path))
@@ -75,9 +75,9 @@ class TunnelIpAllocatorTests(unittest.TestCase):
 
     def test_import_rejects_invalid_version(self) -> None:
         with TemporaryDirectory() as tmpdir:
-            db_path = Path(tmpdir) / "ipdb.json"
-            db_path.write_text(
-                json.dumps(
+            db_path = Path(tmpdir) / "ipdb.pkl"
+            db_path.write_bytes(
+                pickle.dumps(
                     {
                         "version": 999,
                         "network": self.network,
@@ -91,9 +91,9 @@ class TunnelIpAllocatorTests(unittest.TestCase):
 
     def test_import_rejects_missing_network(self) -> None:
         with TemporaryDirectory() as tmpdir:
-            db_path = Path(tmpdir) / "ipdb.json"
-            db_path.write_text(
-                json.dumps(
+            db_path = Path(tmpdir) / "ipdb.pkl"
+            db_path.write_bytes(
+                pickle.dumps(
                     {
                         "version": TunnelIpAllocator.DB_VERSION,
                         "allocations": {},
@@ -106,9 +106,9 @@ class TunnelIpAllocatorTests(unittest.TestCase):
 
     def test_import_rejects_non_dict_allocations(self) -> None:
         with TemporaryDirectory() as tmpdir:
-            db_path = Path(tmpdir) / "ipdb.json"
-            db_path.write_text(
-                json.dumps(
+            db_path = Path(tmpdir) / "ipdb.pkl"
+            db_path.write_bytes(
+                pickle.dumps(
                     {
                         "version": TunnelIpAllocator.DB_VERSION,
                         "network": self.network,
@@ -122,9 +122,9 @@ class TunnelIpAllocatorTests(unittest.TestCase):
 
     def test_import_rejects_non_dict_allocation_entry(self) -> None:
         with TemporaryDirectory() as tmpdir:
-            db_path = Path(tmpdir) / "ipdb.json"
-            db_path.write_text(
-                json.dumps(
+            db_path = Path(tmpdir) / "ipdb.pkl"
+            db_path.write_bytes(
+                pickle.dumps(
                     {
                         "version": TunnelIpAllocator.DB_VERSION,
                         "network": self.network,
@@ -138,9 +138,9 @@ class TunnelIpAllocatorTests(unittest.TestCase):
 
     def test_import_rejects_pair_outside_network(self) -> None:
         with TemporaryDirectory() as tmpdir:
-            db_path = Path(tmpdir) / "ipdb.json"
-            db_path.write_text(
-                json.dumps(
+            db_path = Path(tmpdir) / "ipdb.pkl"
+            db_path.write_bytes(
+                pickle.dumps(
                     {
                         "version": TunnelIpAllocator.DB_VERSION,
                         "network": self.network,
@@ -156,9 +156,9 @@ class TunnelIpAllocatorTests(unittest.TestCase):
 
     def test_import_rejects_duplicate_pair(self) -> None:
         with TemporaryDirectory() as tmpdir:
-            db_path = Path(tmpdir) / "ipdb.json"
-            db_path.write_text(
-                json.dumps(
+            db_path = Path(tmpdir) / "ipdb.pkl"
+            db_path.write_bytes(
+                pickle.dumps(
                     {
                         "version": TunnelIpAllocator.DB_VERSION,
                         "network": self.network,
