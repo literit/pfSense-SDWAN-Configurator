@@ -1,12 +1,14 @@
 # Import libraries for configuration, API interaction, and network calculations
 import logging
 import sys
+from pathlib import Path
 
 # Import configuration and setup modules
 from src.config import parse_args, load_config, build_settings
 from src.tunnels import build_tag_interface_map, build_ipsec_tunnels, build_tunnel_calls, build_tunnel_index
 from src.ipsec import build_ipsec_calls
 from src.devices import build_device_children, apply_tunnels_to_devices, turn_on_ipsec_tunnels, apply_changes_to_all_devices
+from src.ip import TunnelIpAllocator
 
 from src.helper_funcs import RequestClient
 
@@ -35,10 +37,27 @@ def main() -> None:
         # Build tunnel configurations
         tagstointerfaces = build_tag_interface_map(data)
 
+        state_path = Path(args.state_file)
+        if state_path.exists():
+            allocator = TunnelIpAllocator.import_db(str(state_path))
+            if allocator.network_cidr != data["tunnels_network"]:
+                raise ValueError(
+                    "State file network does not match configured tunnels_network: "
+                    f"{allocator.network_cidr} != {data['tunnels_network']}"
+                )
+            logging.info(f"Loaded tunnel IP state from {state_path}")
+        else:
+            allocator = TunnelIpAllocator.init_db(data["tunnels_network"])
+            logging.info(
+                "Initialized new tunnel IP state for network %s",
+                data["tunnels_network"],
+            )
+
         ipsectunnels = build_ipsec_tunnels(
             tagstointerfaces,
             data["tunnels_network"],
             data["hint_prefix"],
+            allocator,
         )
         
         ipsectunnelsbyfirewall = build_tunnel_calls(ipsectunnels, data["firewalls"])
@@ -72,6 +91,9 @@ def main() -> None:
         apply_tunnels_to_devices(device_children, ipsectunnelcalls, tunnel_index, args.dry_run)
         turn_on_ipsec_tunnels(device_children, args.dry_run)
         apply_changes_to_all_devices(device_children, args.dry_run)
+
+        allocator.save_db(str(state_path))
+        logging.info(f"Saved tunnel IP state to {state_path}")
 
         # Stop the refresh timer to exit cleanly
         sessionClient.stop()

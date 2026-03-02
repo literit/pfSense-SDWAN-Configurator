@@ -5,6 +5,7 @@ from src.tunnels import (
     build_tunnel_calls,
     build_tunnel_index,
 )
+from src.ip import TunnelIpAllocator
 
 
 def _make_data(firewalls):
@@ -193,6 +194,41 @@ def test_build_ipsec_tunnels_ip_counter_advances_across_tunnels() -> None:
 def test_build_ipsec_tunnels_empty_tags_returns_empty() -> None:
     tunnels = build_ipsec_tunnels({}, "10.0.0.0/24", "vpn")
     assert tunnels == []
+
+
+def test_build_ipsec_tunnels_uses_provided_allocator() -> None:
+    allocator = TunnelIpAllocator.init_db("10.0.0.0/24")
+    allocator.alloc("pre-existing")
+
+    tunnels = build_ipsec_tunnels(
+        _make_two_firewall_tag_map(),
+        "10.0.0.0/24",
+        "vpn",
+        ip_allocator=allocator,
+    )
+
+    assert tunnels[0]["interface1"]["tunnel_ip"] == "10.0.0.2"
+    assert tunnels[0]["interface2"]["tunnel_ip"] == "10.0.0.3"
+
+
+def test_build_ipsec_tunnels_allocator_keeps_stable_tunnel_pair() -> None:
+    allocator = TunnelIpAllocator.init_db("10.0.0.0/24")
+
+    first = build_ipsec_tunnels(
+        _make_two_firewall_tag_map(),
+        "10.0.0.0/24",
+        "vpn",
+        ip_allocator=allocator,
+    )
+    second = build_ipsec_tunnels(
+        _make_two_firewall_tag_map(),
+        "10.0.0.0/24",
+        "vpn",
+        ip_allocator=allocator,
+    )
+
+    assert first[0]["interface1"]["tunnel_ip"] == second[0]["interface1"]["tunnel_ip"]
+    assert first[0]["interface2"]["tunnel_ip"] == second[0]["interface2"]["tunnel_ip"]
 
 
 def test_build_tunnel_calls_basic_structure() -> None:

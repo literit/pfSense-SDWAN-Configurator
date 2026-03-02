@@ -1,10 +1,11 @@
 """Tunnel building and infrastructure module."""
 
 import logging
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 import ipcalc
 import src.utils as utils
+from src.ip import TunnelIpAllocator
 
 
 def build_tag_interface_map(data: Dict[str, Any]) -> Dict[str, List[Dict[str, str]]]:
@@ -64,7 +65,8 @@ def create_tunnel_name(
 def build_ipsec_tunnels(
     tagstointerfaces: Dict[str, List[Dict[str, str]]], 
     tunnels_network: str, 
-    hint_prefix: str
+    hint_prefix: str,
+    ip_allocator: Optional[TunnelIpAllocator] = None,
 ) -> List[Dict[str, Any]]:
     """Builds a list of IPSec tunnels based on the mapping of tags to interfaces.
     
@@ -82,7 +84,7 @@ def build_ipsec_tunnels(
         interfaces and configuration details.
     """
     ipsectunnels = []
-    ipcounter = 0
+    allocator = ip_allocator or TunnelIpAllocator.init_db(tunnels_network)
     
     logging.info(f"Building IPSec tunnels from network {tunnels_network}")
     
@@ -90,24 +92,36 @@ def build_ipsec_tunnels(
         for i in range(len(interfaces)):
             for j in range(i + 1, len(interfaces)):
                 if interfaces[i]["firewall"] != interfaces[j]["firewall"]:
-                    interface1 = dict(interfaces[i])
+                    endpoint1 = interfaces[i]
+                    endpoint2 = interfaces[j]
+
+                    tunnel_id = "|".join(
+                        sorted(
+                            [
+                                f"{tag}:{endpoint1['firewall']}:{endpoint1['interface']}",
+                                f"{tag}:{endpoint2['firewall']}:{endpoint2['interface']}",
+                            ]
+                        )
+                    )
+                    tunnel_ip1, tunnel_ip2 = allocator.alloc(tunnel_id)
+
+                    interface1 = dict(endpoint1)
                     interface1["tunnel_name"] = create_tunnel_name(
                         hint_prefix,
-                        interfaces[i]["interface"],
-                        interfaces[j]["firewall"],
-                        interfaces[j]["interface"]
+                        endpoint1["interface"],
+                        endpoint2["firewall"],
+                        endpoint2["interface"]
                     )
-                    interface1["tunnel_ip"] = str(ipcalc.Network(tunnels_network) + ipcounter)
+                    interface1["tunnel_ip"] = tunnel_ip1
 
-                    interface2 = dict(interfaces[j])
+                    interface2 = dict(endpoint2)
                     interface2["tunnel_name"] = create_tunnel_name(
                         hint_prefix,
-                        interfaces[j]["interface"],
-                        interfaces[i]["firewall"],
-                        interfaces[i]["interface"]
+                        endpoint2["interface"],
+                        endpoint1["firewall"],
+                        endpoint1["interface"]
                     )
-                    interface2["tunnel_ip"] = str(ipcalc.Network(tunnels_network) + ipcounter + 1)  # type: ignore
-                    ipcounter += 2
+                    interface2["tunnel_ip"] = tunnel_ip2
 
                     ipsectunnels.append({
                         "tag": tag,

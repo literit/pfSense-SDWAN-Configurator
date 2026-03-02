@@ -68,7 +68,10 @@ Dry run (builds config without API calls):
 python main.py --file pfhq.yaml --dry_run
 ```
 
-> Note: `--state_file` is reserved for future use and is not currently applied.
+Persist and reuse tunnel IP allocations (default state file: `pfhq.data`):
+```bash
+python main.py --file pfhq.yaml --state_file pfhq.data
+```
 
 ## How it works
 For every tag, the tool pairs interfaces on different firewalls, generates a unique
