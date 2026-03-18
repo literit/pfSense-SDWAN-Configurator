@@ -64,7 +64,7 @@ def main() -> None:
         tunnel_index = build_tunnel_index(ipsectunnelsbyfirewall)
         ipsectunnelcalls, tunnel_index = build_ipsec_calls(
             ipsectunnelsbyfirewall,
-            data["ipsec"]["ike"],
+            data["ipsec"],
             tunnel_index
         )
 

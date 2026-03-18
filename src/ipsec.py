@@ -1,7 +1,7 @@
 """IPSec phase configuration module."""
 
 import logging
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Mapping, Tuple, TypedDict
 
 import ipcalc
 from pfapi.models import (
@@ -10,7 +10,105 @@ from pfapi.models import (
 )
 
 
-def make_ipsec_phases(tunnel: Dict[str, str], ike_version: str) -> Tuple[Phase1, Phase2]:
+DEFAULT_IPSEC_SETTINGS = {
+    "ike": "ikev2",
+    "p1_encryption": "aes",
+    "p1_encryption_bits": "128",
+    "p1_hash": "sha256",
+    "p1_group": "14",
+    "p2_encryption": "aes",
+    "p2_encryption_bits": "128",
+    "p2_hash": "sha256",
+    "p2_group": "14",
+}
+
+SUPPORTED_IKE = {"ikev1", "ikev2"}
+SUPPORTED_PHASE1_ENCRYPTION = {"aes", "aes128gcm", "aes256gcm", "chacha20poly1305"}
+SUPPORTED_PHASE2_ENCRYPTION = {"aes", "aes128gcm", "aes256gcm", "chacha20poly1305"}
+SUPPORTED_PHASE1_HASH = {"", "sha1", "sha256", "sha384", "sha512"}
+SUPPORTED_PHASE2_HASH = {"", "sha1", "sha256", "sha384", "sha512"}
+
+
+class IpsecConfig(TypedDict, total=False):
+    """IPSec settings accepted from YAML."""
+
+    ike: str
+    p1_encryption: str
+    p1_encryption_bits: str
+    p1_hash: str | None
+    p1_group: str
+    p2_encryption: str
+    p2_encryption_bits: str
+    p2_hash: str | None
+    p2_group: str
+
+
+def _normalize_ipsec_settings(ipsec_config: Mapping[str, Any] | None) -> Dict[str, str]:
+    """Normalizes user-supplied IPSec settings with defaults."""
+    merged: Dict[str, Any] = {**DEFAULT_IPSEC_SETTINGS, **(ipsec_config or {})}
+
+    normalized: Dict[str, str] = {}
+    for key, value in merged.items():
+        if value is None:
+            normalized[key] = ""
+            continue
+        normalized[key] = str(value)
+
+    return normalized
+
+
+def _validate_positive_integer(value: str, key: str) -> None:
+    try:
+        parsed = int(value)
+    except ValueError as err:
+        raise ValueError(f"Invalid IPSec setting '{key}': '{value}' is not an integer") from err
+
+    if parsed <= 0:
+        raise ValueError(f"Invalid IPSec setting '{key}': '{value}' must be greater than 0")
+
+
+def _validate_ipsec_settings(settings: Dict[str, str]) -> None:
+    """Validates normalized IPSec settings."""
+    if settings["ike"] not in SUPPORTED_IKE:
+        raise ValueError(
+            f"Invalid IPSec setting 'ike': '{settings['ike']}'. "
+            f"Supported values: {', '.join(sorted(SUPPORTED_IKE))}"
+        )
+
+    if settings["p1_encryption"] not in SUPPORTED_PHASE1_ENCRYPTION:
+        raise ValueError(
+            f"Invalid IPSec setting 'p1_encryption': '{settings['p1_encryption']}'. "
+            f"Supported values: {', '.join(sorted(SUPPORTED_PHASE1_ENCRYPTION))}"
+        )
+
+    if settings["p2_encryption"] not in SUPPORTED_PHASE2_ENCRYPTION:
+        raise ValueError(
+            f"Invalid IPSec setting 'p2_encryption': '{settings['p2_encryption']}'. "
+            f"Supported values: {', '.join(sorted(SUPPORTED_PHASE2_ENCRYPTION))}"
+        )
+
+    if settings["p1_hash"] not in SUPPORTED_PHASE1_HASH:
+        raise ValueError(
+            f"Invalid IPSec setting 'p1_hash': '{settings['p1_hash']}'. "
+            f"Supported values: {', '.join(sorted(SUPPORTED_PHASE1_HASH))}"
+        )
+
+    if settings["p2_hash"] not in SUPPORTED_PHASE2_HASH:
+        raise ValueError(
+            f"Invalid IPSec setting 'p2_hash': '{settings['p2_hash']}'. "
+            f"Supported values: {', '.join(sorted(SUPPORTED_PHASE2_HASH))}"
+        )
+
+    _validate_positive_integer(settings["p1_group"], "p1_group")
+    _validate_positive_integer(settings["p2_group"], "p2_group")
+    _validate_positive_integer(settings["p1_encryption_bits"], "p1_encryption_bits")
+    _validate_positive_integer(settings["p2_encryption_bits"], "p2_encryption_bits")
+
+
+def make_ipsec_phases(
+    tunnel: Dict[str, str],
+    ipsec_config: Mapping[str, Any] | None,
+) -> Tuple[Phase1, Phase2]:
     """Creates Phase 1 and Phase 2 configuration objects for a given tunnel.
     
     The configuration is based on consistent defaults for all tunnels, with specific
@@ -20,12 +118,15 @@ def make_ipsec_phases(tunnel: Dict[str, str], ike_version: str) -> Tuple[Phase1,
     
     Args:
         tunnel: A dictionary containing the tunnel details.
-        ike_version: The IKE version to use (e.g., "ikev2").
+        ipsec_config: IPSec config values from YAML.
         
     Returns:
         A tuple of (Phase1, Phase2) objects configured for the tunnel.
     """
-    phase1 = Phase1(iketype=ike_version)
+    settings = _normalize_ipsec_settings(ipsec_config)
+    _validate_ipsec_settings(settings)
+
+    phase1 = Phase1(iketype=settings["ike"])
     phase1.disabled = False
     phase1.descr = tunnel["name"]
     phase1.interface = tunnel["interface"]
@@ -46,11 +147,20 @@ def make_ipsec_phases(tunnel: Dict[str, str], ike_version: str) -> Tuple[Phase1,
     phase1.dpd_delay = 10
     phase1.dpd_maxfail = 5
 
+    phase1_encryption_algorithm = {"name": settings["p1_encryption"]}
+    if settings["p1_encryption_bits"]:
+        phase1_encryption_algorithm["keylen"] = settings["p1_encryption_bits"]
+
+    phase1_item = {
+        "dhgroup": settings["p1_group"],
+        "encryption_algorithm": phase1_encryption_algorithm,
+    }
+    if settings["p1_hash"]:
+        phase1_item["hash_algorithm"] = settings["p1_hash"]
+
     encryption_dict = {
         'item': [{
-            'dhgroup': '14',
-            'encryption_algorithm': {'keylen': '128', 'name': 'aes'},
-            'hash_algorithm': 'sha256'
+            **phase1_item
         }]
     }
     phase1.encryption = Phase1Encryption.from_dict(encryption_dict)
@@ -73,12 +183,15 @@ def make_ipsec_phases(tunnel: Dict[str, str], ike_version: str) -> Tuple[Phase1,
     }
     phase2.remoteid = Phase2RemoteId.from_dict(remoteid_dict)
     phase2.protocol = "esp"
+    phase2_encryption_algorithm = {"name": settings["p2_encryption"]}
+    if settings["p2_encryption_bits"]:
+        phase2_encryption_algorithm["keylen"] = settings["p2_encryption_bits"]
+
     phase2.encryption_algorithm_option = [
-        EncryptionAlgorithm.from_dict({"name": "aes", "keylen": "128"}),
-        EncryptionAlgorithm.from_dict({"name": "aes128gcm", "keylen": "128"})
+        EncryptionAlgorithm.from_dict(phase2_encryption_algorithm)
     ]
-    phase2.hash_algorithm_option = ["hmac_sha256"]
-    phase2.pfsgroup = "14"
+    phase2.hash_algorithm_option = [settings["p2_hash"]] if settings["p2_hash"] or settings["p2_hash"] != "" else []
+    phase2.pfsgroup = settings["p2_group"]
     phase2.lifetime = 3600  # 1 hour
     phase2.rekey_time = 0
     phase2.rand_time = 0
@@ -93,14 +206,14 @@ def make_ipsec_phases(tunnel: Dict[str, str], ike_version: str) -> Tuple[Phase1,
 
 def build_ipsec_calls(
     ipsectunnelsbyfirewall: Dict[str, Any],
-    ike_version: str,
+    ipsec_config: Mapping[str, Any],
     tunnel_index: Dict[str, Dict[str, Any]]
 ) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
     """Builds Phase 1 and Phase 2 configuration objects for all tunnels.
     
     Args:
         ipsectunnelsbyfirewall: Mapping of firewall names to tunnel call details.
-        ike_version: The IKE version to use for all Phase 1 configurations.
+        ipsec_config: IPSec settings from YAML.
         tunnel_index: Mapping of firewall names to tunnel details for quick lookup.
         
     Returns:
@@ -108,12 +221,15 @@ def build_ipsec_calls(
         - ipsectunnelcalls: Mapping of firewall names to Phase 1 configuration objects
         - tunnel_index: Updated tunnel index including Phase 2 configuration objects
     """
+    settings = _normalize_ipsec_settings(ipsec_config)
+    _validate_ipsec_settings(settings)
+
     # Prepare Phase 1 objects per firewall.
     ipsectunnelcalls = {firewall: [] for firewall in ipsectunnelsbyfirewall}
     
     for firewall, tunnels in ipsectunnelsbyfirewall.items():
         for tunnel in tunnels:
-            phase1, phase2 = make_ipsec_phases(tunnel, ike_version)
+            phase1, phase2 = make_ipsec_phases(tunnel, settings)
             ipsectunnelcalls[firewall].append(phase1)
             tunnel_index[firewall][tunnel["name"]]["phase2"] = phase2
     
