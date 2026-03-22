@@ -105,33 +105,32 @@ def test_apply_tunnels_to_devices_sets_ikeid_and_phase2_calls() -> None:
 def test_turn_on_ipsec_tunnels_creates_missing_ipsec_interfaces() -> None:
     child = MagicMock()
 
-    descriptors_response = MagicMock()
-    descriptors_response.to_dict.return_value = {
-        "descriptors": {
-            "physical": {
-                "ipsec0": "IPsec 0",
-                "igb0": "LAN",
-            }
-        }
-    }
     interfaces_response = MagicMock()
     interfaces_response.to_dict.return_value = {
         "interfaces": [{"if": "igb0"}]
     }
 
-    child.call.side_effect = [descriptors_response, interfaces_response, None]
+    add_interface_response = MagicMock()
+    add_interface_response.to_dict.return_value = {"assigned": "OPT42"}
 
-    turn_on_ipsec_tunnels({"fw1": child}, dry_run=False)
+    child.call.side_effect = [interfaces_response, add_interface_response]
 
-    child.call.assert_any_call(get_interface_descriptors.sync)
+    phase2 = SimpleNamespace(ikeid="0")
+    tunnel_index = {"fw1": {"tun-a": {"phase2": phase2}}}
+
+    turn_on_ipsec_tunnels({"fw1": child}, dry_run=False, tunnel_index=tunnel_index)
+
     child.call.assert_any_call(get_interfaces.sync)
     child.call.assert_any_call(add_interface.sync, body=ANY)
+    assert tunnel_index["fw1"]["tun-a"]["interface_assigned"] == "OPT42"
+    assert tunnel_index["fw1"]["tun-a"]["interface_device"] == "ipsec0"
+    assert tunnel_index["fw1"]["tun-a"]["interface_identity"] == "opt42"
 
 
 def test_turn_on_ipsec_tunnels_dry_run_skips_api_calls() -> None:
     child = MagicMock()
 
-    turn_on_ipsec_tunnels({"fw1": child}, dry_run=True)
+    turn_on_ipsec_tunnels({"fw1": child}, dry_run=True, tunnel_index={"fw1": {}})
 
     child.call.assert_not_called()
 

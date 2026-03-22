@@ -28,14 +28,14 @@ def _make_tunnel(fw1="fw1", fw2="fw2"):
             "firewall": fw1,
             "interface": "eth0",
             "ip": "1.1.1.1",
-            "tunnel_name": "vpn_eth0-fw2-eth1",
+            "tunnel_name": "vpn_eth0_fw2_eth1",
             "tunnel_ip": "10.0.0.0",
         },
         "interface2": {
             "firewall": fw2,
             "interface": "eth1",
             "ip": "2.2.2.2",
-            "tunnel_name": "vpn_eth1-fw1-eth0",
+            "tunnel_name": "vpn_eth1_fw1_eth0",
             "tunnel_ip": "10.0.0.1",
         },
         "secret": "mysecret",
@@ -44,12 +44,12 @@ def _make_tunnel(fw1="fw1", fw2="fw2"):
 
 def test_create_tunnel_name_basic_format() -> None:
     name = create_tunnel_name("hint", "eth0", "fw2", "eth1")
-    assert name == "hint_eth0-fw2-eth1"
+    assert name == "hint_eth0_fw2_eth1"
 
 
 def test_create_tunnel_name_empty_prefix() -> None:
     name = create_tunnel_name("", "eth0", "fw2", "eth1")
-    assert name == "_eth0-fw2-eth1"
+    assert name == "_eth0_fw2_eth1"
 
 
 def test_create_tunnel_name_all_components_present() -> None:
@@ -244,7 +244,7 @@ def test_build_tunnel_calls_call_details_fw1() -> None:
     firewalls = [{"name": "fw1"}, {"name": "fw2"}]
     result = build_tunnel_calls([_make_tunnel()], firewalls)
     call = result["fw1"][0]
-    assert call["name"] == "vpn_eth0-fw2-eth1"
+    assert call["name"] == "vpn_eth0_fw2_eth1"
     assert call["interface"] == "eth0"
     assert call["remote_gateway"] == "2.2.2.2"
     assert call["pre_shared_key"] == "mysecret"
@@ -256,7 +256,7 @@ def test_build_tunnel_calls_call_details_fw2() -> None:
     firewalls = [{"name": "fw1"}, {"name": "fw2"}]
     result = build_tunnel_calls([_make_tunnel()], firewalls)
     call = result["fw2"][0]
-    assert call["name"] == "vpn_eth1-fw1-eth0"
+    assert call["name"] == "vpn_eth1_fw1_eth0"
     assert call["interface"] == "eth1"
     assert call["remote_gateway"] == "1.1.1.1"
     assert call["tunnel_ip"] == "10.0.0.1"

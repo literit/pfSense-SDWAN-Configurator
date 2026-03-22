@@ -7,6 +7,7 @@ from pathlib import Path
 from src.config import parse_args, load_config, build_settings
 from src.tunnels import build_tag_interface_map, build_ipsec_tunnels, build_tunnel_calls, build_tunnel_index
 from src.ipsec import build_ipsec_calls
+from src.gateways import apply_gateways_to_devices
 from src.devices import build_device_children, apply_tunnels_to_devices, turn_on_ipsec_tunnels, apply_changes_to_all_devices
 from src.ip import TunnelIpAllocator
 
@@ -89,8 +90,13 @@ def main() -> None:
         # Build device clients and apply configurations
         device_children = build_device_children(sessionClient)
         apply_tunnels_to_devices(device_children, ipsectunnelcalls, tunnel_index, args.dry_run)
-        turn_on_ipsec_tunnels(device_children, args.dry_run)
+        turn_on_ipsec_tunnels(
+            device_children,
+            dry_run=args.dry_run,
+            tunnel_index=tunnel_index,
+        )
         apply_changes_to_all_devices(device_children, args.dry_run)
+        apply_gateways_to_devices(device_children, tunnel_index, args.dry_run)
 
         allocator.save_db(str(state_path))
         logging.info(f"Saved tunnel IP state to {state_path}")

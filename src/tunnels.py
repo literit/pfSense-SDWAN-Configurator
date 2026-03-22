@@ -58,7 +58,7 @@ def create_tunnel_name(
     Returns:
         A string representing the generated tunnel name.
     """
-    return f"{hint_prefix}_{interface_name}-{remote_firewall}-{remote_interface}"
+    return f"{hint_prefix}_{interface_name}_{remote_firewall}_{remote_interface}"
 
 
 # I could probably merge this and the next function into one. I 

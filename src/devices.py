@@ -1,13 +1,36 @@
 """Device interaction and API calls module."""
 
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from pfapi.api.mim import get_controlled_devices
 from pfapi.api.interfaces import get_interfaces, get_interface_descriptors, add_interface
 from pfapi.api.vpn import set_ip_sec_phase_1, set_ip_sec_phase_2
 from pfapi.api.system import apply_dirty_config
 from pfapi.models import Interface, ApplyDirtyConfigRequest
+
+
+def _extract_interface_assigned(interface_response: Any) -> Optional[str]:
+    """Extracts the assigned interface name (e.g., OPT9) from add_interface response."""
+    if interface_response is None:
+        return None
+
+    response_dict = (
+        interface_response.to_dict()
+        if hasattr(interface_response, "to_dict")
+        else interface_response
+    )
+    if not isinstance(response_dict, dict):
+        return None
+
+    if "assigned" in response_dict and response_dict["assigned"]:
+        return str(response_dict["assigned"])
+
+    data = response_dict.get("data")
+    if isinstance(data, dict) and data.get("assigned"):
+        return str(data["assigned"])
+
+    return None
 
 
 def build_device_children(sessionClient: Any) -> Dict[str, Any]:
@@ -112,7 +135,11 @@ def apply_tunnels_to_devices(
             raise
 
 
-def turn_on_ipsec_tunnels(device_children: Dict[str, Any], dry_run: bool = False) -> None:
+def turn_on_ipsec_tunnels(
+    device_children: Dict[str, Any],
+    dry_run: bool = False,
+    tunnel_index: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> None:
     """Turns on the IPSec tunnels on the devices by ensuring necessary interfaces are enabled.
     
     It retrieves the interface descriptors for each device, identifies the IPSec-related
@@ -122,7 +149,10 @@ def turn_on_ipsec_tunnels(device_children: Dict[str, Any], dry_run: bool = False
     Args:
         device_children: Mapping of device names to child API clients.
         dry_run: If True, skip actual API calls.
+        tunnel_index: Optional mapping of firewall names to tunnel details.
     """
+    tunnel_index = tunnel_index or {}
+
     for device_name, child in device_children.items():
         try:
             logging.info(f"Enabling IPSec interfaces on device: {device_name}")
@@ -131,21 +161,34 @@ def turn_on_ipsec_tunnels(device_children: Dict[str, Any], dry_run: bool = False
                 logging.info(f"[DRY RUN] Would enable IPSec interfaces on {device_name}")
                 continue
             
-            # Get physical descriptors
-            descriptors = child.call(get_interface_descriptors.sync).to_dict()["descriptors"]["physical"]
-            ipsec_descriptors = {
-                k: v for k, v in descriptors.items() if k.startswith("ipsec")
-            }
-            
             # Get current interfaces
             interfaces = child.call(get_interfaces.sync).to_dict()["interfaces"]
             existing_interface_names = [interface["if"] for interface in interfaces]
-            
-            # Determine which interfaces need to be created
-            interfaces_to_be_made = [
-                descriptor for descriptor in ipsec_descriptors.keys()
-                if descriptor not in existing_interface_names
-            ]
+
+            # Determine required interfaces from tunnel index first (by ikeid)
+            required_interfaces = set()
+            for tunnel_data in tunnel_index.get(device_name, {}).values():
+                phase2 = tunnel_data.get("phase2")
+                ikeid = str(getattr(phase2, "ikeid", "")).strip()
+                if ikeid:
+                    required_interfaces.add(f"ipsec{ikeid}")
+
+            if required_interfaces:
+                interfaces_to_be_made = [
+                    interface_name
+                    for interface_name in sorted(required_interfaces)
+                    if interface_name not in existing_interface_names
+                ]
+            else:
+                # Fallback to descriptor-based creation when tunnel index is unavailable
+                descriptors = child.call(get_interface_descriptors.sync).to_dict()["descriptors"]["physical"]
+                ipsec_descriptors = {
+                    k: v for k, v in descriptors.items() if k.startswith("ipsec")
+                }
+                interfaces_to_be_made = [
+                    descriptor for descriptor in ipsec_descriptors.keys()
+                    if descriptor not in existing_interface_names
+                ]
             
             if not interfaces_to_be_made:
                 logging.info(f"All IPSec interfaces already enabled on {device_name}")
@@ -157,7 +200,28 @@ def turn_on_ipsec_tunnels(device_children: Dict[str, Any], dry_run: bool = False
                 new_interface = Interface()
                 new_interface.if_ = interface
                 new_interface.enable = True
-                child.call(add_interface.sync, body=new_interface)
+                interface_response = child.call(add_interface.sync, body=new_interface)
+
+                ikeid = interface[len("ipsec"):] if interface.startswith("ipsec") else ""
+                if ikeid:
+                    interface_assigned = _extract_interface_assigned(interface_response)
+                    for tunnel_name, tunnel_data in tunnel_index.get(device_name, {}).items():
+                        phase2 = tunnel_data.get("phase2")
+                        phase2_ikeid = str(getattr(phase2, "ikeid", "")).strip()
+                        if phase2_ikeid != ikeid:
+                            continue
+
+                        tunnel_data["interface_device"] = interface
+                        if interface_assigned:
+                            tunnel_data["interface_identity"] = interface_assigned.lower()
+                        if interface_assigned:
+                            tunnel_data["interface_assigned"] = interface_assigned
+                            logging.debug(
+                                "Stored interface assignment '%s' for tunnel '%s' on '%s'",
+                                interface_assigned,
+                                tunnel_name,
+                                device_name,
+                            )
             
             logging.info(f"Created {len(interfaces_to_be_made)} IPSec interface(s) on {device_name}")
             
