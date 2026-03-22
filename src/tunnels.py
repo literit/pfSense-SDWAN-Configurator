@@ -61,7 +61,6 @@ def create_tunnel_name(
     return f"{hint_prefix}_{interface_name}_{remote_firewall}_{remote_interface}"
 
 
-# I could probably merge this and the next function into one. I 
 def build_ipsec_tunnels(
     tagstointerfaces: Dict[str, List[Dict[str, str]]], 
     tunnels_network: str, 

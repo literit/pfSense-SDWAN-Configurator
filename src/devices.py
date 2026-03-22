@@ -1,6 +1,7 @@
 """Device interaction and API calls module."""
 
 import logging
+import re
 from typing import Dict, Any, List, Optional
 
 from pfapi.api.mim import get_controlled_devices
@@ -197,20 +198,25 @@ def turn_on_ipsec_tunnels(
             # Create missing interfaces
             for interface in interfaces_to_be_made:
                 logging.info(f"Creating interface: {interface}")
-                new_interface = Interface()
-                new_interface.if_ = interface
-                new_interface.enable = True
-                interface_response = child.call(add_interface.sync, body=new_interface)
-
+                
                 ikeid = interface[len("ipsec"):] if interface.startswith("ipsec") else ""
                 if ikeid:
-                    interface_assigned = _extract_interface_assigned(interface_response)
+                    # Find the matching tunnel to get its name
                     for tunnel_name, tunnel_data in tunnel_index.get(device_name, {}).items():
                         phase2 = tunnel_data.get("phase2")
                         phase2_ikeid = str(getattr(phase2, "ikeid", "")).strip()
                         if phase2_ikeid != ikeid:
                             continue
 
+                        # Found matching tunnel, create interface with cleaned tunnel name as descr
+                        new_interface = Interface()
+                        new_interface.if_ = interface
+                        new_interface.enable = True
+                        # Remove all special characters from tunnel name except underscores
+                        new_interface.descr = re.sub(r'[^a-zA-Z0-9_]', '', tunnel_name)
+                        interface_response = child.call(add_interface.sync, body=new_interface)
+
+                        interface_assigned = _extract_interface_assigned(interface_response)
                         tunnel_data["interface_device"] = interface
                         if interface_assigned:
                             tunnel_data["interface_identity"] = interface_assigned.lower()
@@ -222,6 +228,7 @@ def turn_on_ipsec_tunnels(
                                 tunnel_name,
                                 device_name,
                             )
+                        break
             
             logging.info(f"Created {len(interfaces_to_be_made)} IPSec interface(s) on {device_name}")
             
