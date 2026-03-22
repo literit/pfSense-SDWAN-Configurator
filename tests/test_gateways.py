@@ -24,6 +24,20 @@ class _FakeGateway:
         self.additional[key] = value
 
 
+class _FakeGatewayGroupPriority:
+    def __init__(self, gateway: str, priority: str, vaddress: str):
+        self.gateway = gateway
+        self.priority = priority
+        self.vaddress = vaddress
+
+
+class _FakeGatewayGroup:
+    def __init__(self, name: str):
+        self.name = name
+        self.trigger = None
+        self.gateway_priority = None
+
+
 class _ApiError(Exception):
     def __init__(self, message: str, response):
         super().__init__(message)
@@ -216,6 +230,112 @@ def test_apply_gateways_to_devices_uses_interface_data_from_tunnel_index(monkeyp
     assert body.interface_device == "ipsec55"
     assert body.interface_identity == "opt55"
     assert body.interface_assigned == "OPT55"
+
+
+def test_apply_gateways_to_devices_creates_gateway_group_per_remote_firewall(monkeypatch) -> None:
+    interfaces_response = MagicMock()
+    interfaces_response.to_dict.return_value = {
+        "interfaces": [
+            {
+                "if": "ipsec7",
+                "assigned": "OPT7",
+                "identity": "opt7",
+            },
+            {
+                "if": "ipsec8",
+                "assigned": "OPT8",
+                "identity": "opt8",
+            },
+        ]
+    }
+
+    child = MagicMock()
+    child.call.side_effect = [interfaces_response, None, None, None]
+
+    get_interfaces_sync = object()
+    add_gateway_sync = object()
+    add_gateway_group_sync = object()
+
+    monkeypatch.setattr("src.gateways.get_interfaces", SimpleNamespace(sync=get_interfaces_sync))
+    monkeypatch.setattr("src.gateways.add_gateway", SimpleNamespace(sync=add_gateway_sync))
+    monkeypatch.setattr("src.gateways.add_gateway_group", SimpleNamespace(sync=add_gateway_group_sync))
+    monkeypatch.setattr("src.gateways.Gateway", _FakeGateway)
+    monkeypatch.setattr("src.gateways.GatewayGroup", _FakeGatewayGroup)
+    monkeypatch.setattr("src.gateways.GatewayGroupPriority", _FakeGatewayGroupPriority)
+
+    phase2_a = SimpleNamespace(ikeid="7", remoteid=SimpleNamespace(address="169.254.0.20"))
+    phase2_b = SimpleNamespace(ikeid="8", remoteid=SimpleNamespace(address="169.254.0.22"))
+
+    apply_gateways_to_devices(
+        device_children={"fw1": child},
+        tunnel_index={
+            "fw1": {
+                "tun-1": {
+                    "phase2": phase2_a,
+                    "remote_firewall": "homearpa",
+                },
+                "tun-2": {
+                    "phase2": phase2_b,
+                    "remote_firewall": "homearpa",
+                },
+            }
+        },
+    )
+
+    assert child.call.call_count == 4
+    _, group_kwargs = child.call.call_args_list[3]
+    group_body = group_kwargs["body"]
+
+    assert group_body.name == "To_homearpa"
+    assert group_body.trigger == "down"
+    assert [item.gateway for item in group_body.gateway_priority] == ["tun1", "tun2"]
+    assert [item.priority for item in group_body.gateway_priority] == ["1", "1"]
+    assert [item.vaddress for item in group_body.gateway_priority] == ["address", "address"]
+
+
+def test_apply_gateways_to_devices_sanitizes_gateway_group_name(monkeypatch) -> None:
+    interfaces_response = MagicMock()
+    interfaces_response.to_dict.return_value = {
+        "interfaces": [
+            {
+                "if": "ipsec9",
+                "assigned": "OPT9",
+                "identity": "opt9",
+            }
+        ]
+    }
+
+    child = MagicMock()
+    child.call.side_effect = [interfaces_response, None, None]
+
+    get_interfaces_sync = object()
+    add_gateway_sync = object()
+    add_gateway_group_sync = object()
+
+    monkeypatch.setattr("src.gateways.get_interfaces", SimpleNamespace(sync=get_interfaces_sync))
+    monkeypatch.setattr("src.gateways.add_gateway", SimpleNamespace(sync=add_gateway_sync))
+    monkeypatch.setattr("src.gateways.add_gateway_group", SimpleNamespace(sync=add_gateway_group_sync))
+    monkeypatch.setattr("src.gateways.Gateway", _FakeGateway)
+    monkeypatch.setattr("src.gateways.GatewayGroup", _FakeGatewayGroup)
+    monkeypatch.setattr("src.gateways.GatewayGroupPriority", _FakeGatewayGroupPriority)
+
+    phase2 = SimpleNamespace(ikeid="9", remoteid=SimpleNamespace(address="169.254.0.14"))
+
+    apply_gateways_to_devices(
+        device_children={"fw1.home.arpa": child},
+        tunnel_index={
+            "fw1.home.arpa": {
+                "tun-1": {
+                    "phase2": phase2,
+                    "remote_firewall": "fw2.home.arpa",
+                },
+            }
+        },
+    )
+
+    _, group_kwargs = child.call.call_args_list[2]
+    group_body = group_kwargs["body"]
+    assert group_body.name == "To_fw2homearpa"
 
 
 def test_apply_gateways_to_devices_raises_on_add_gateway_error_without_error_logs(monkeypatch, caplog) -> None:

@@ -247,6 +247,7 @@ def test_build_tunnel_calls_call_details_fw1() -> None:
     assert call["name"] == "vpn_eth0_fw2_eth1"
     assert call["interface"] == "eth0"
     assert call["remote_gateway"] == "2.2.2.2"
+    assert call["remote_firewall"] == "fw2"
     assert call["pre_shared_key"] == "mysecret"
     assert call["tunnel_ip"] == "10.0.0.0"
     assert call["remote_tunnel_ip"] == "10.0.0.1"
@@ -259,6 +260,7 @@ def test_build_tunnel_calls_call_details_fw2() -> None:
     assert call["name"] == "vpn_eth1_fw1_eth0"
     assert call["interface"] == "eth1"
     assert call["remote_gateway"] == "1.1.1.1"
+    assert call["remote_firewall"] == "fw1"
     assert call["tunnel_ip"] == "10.0.0.1"
     assert call["remote_tunnel_ip"] == "10.0.0.0"
 

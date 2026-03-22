@@ -162,6 +162,7 @@ def build_tunnel_calls(
             "name": tunnel["interface1"]["tunnel_name"],
             "interface": tunnel["interface1"]["interface"],
             "remote_gateway": tunnel["interface2"]["ip"],
+            "remote_firewall": firewall2,
             "pre_shared_key": tunnel["secret"],
             "tunnel_ip": tunnel["interface1"]["tunnel_ip"],
             "remote_tunnel_ip": tunnel["interface2"]["tunnel_ip"]
@@ -170,6 +171,7 @@ def build_tunnel_calls(
             "name": tunnel["interface2"]["tunnel_name"],
             "interface": tunnel["interface2"]["interface"],
             "remote_gateway": tunnel["interface1"]["ip"],
+            "remote_firewall": firewall1,
             "pre_shared_key": tunnel["secret"],
             "tunnel_ip": tunnel["interface2"]["tunnel_ip"],
             "remote_tunnel_ip": tunnel["interface1"]["tunnel_ip"]
