@@ -6,7 +6,7 @@ from typing import Dict, Any, List, Optional
 
 from pfapi.api.mim import get_controlled_devices
 from pfapi.api.interfaces import get_interfaces, get_interface_descriptors, add_interface
-from pfapi.api.vpn import set_ip_sec_phase_1, set_ip_sec_phase_2
+from pfapi.api.vpn import get_ip_sec_phases, set_ip_sec_phase_1, set_ip_sec_phase_2
 from pfapi.api.system import apply_dirty_config
 from pfapi.models import Interface, ApplyDirtyConfigRequest
 
@@ -32,6 +32,49 @@ def _extract_interface_assigned(interface_response: Any) -> Optional[str]:
         return str(data["assigned"])
 
     return None
+
+
+def _extract_existing_phase1_ikeids(phases_response: Any) -> Dict[str, str]:
+    """Extracts existing Phase 1 tunnel names mapped to IKE IDs from API response."""
+    response_dict = (
+        phases_response.to_dict()
+        if hasattr(phases_response, "to_dict")
+        else phases_response
+    )
+    if not isinstance(response_dict, dict):
+        return {}
+
+    candidates: List[Any] = []
+    data = response_dict.get("data")
+    if isinstance(data, dict):
+        candidates.append(data)
+    candidates.append(response_dict)
+
+    existing: Dict[str, str] = {}
+    list_keys = ("phase_1", "phase1", "phase_1s", "phase1s")
+
+    for container in candidates:
+        for key in list_keys:
+            phase1_list = container.get(key)
+            if not isinstance(phase1_list, list):
+                continue
+
+            for item in phase1_list:
+                item_dict = item.to_dict() if hasattr(item, "to_dict") else item
+                if not isinstance(item_dict, dict):
+                    continue
+
+                descr = item_dict.get("descr")
+                ikeid = item_dict.get("ikeid") or item_dict.get("ike_id")
+                if descr is None or ikeid is None:
+                    continue
+
+                descr_str = str(descr).strip()
+                ikeid_str = str(ikeid).strip()
+                if descr_str and ikeid_str:
+                    existing[descr_str] = ikeid_str
+
+    return existing
 
 
 def build_device_children(sessionClient: Any) -> Dict[str, Any]:
@@ -110,10 +153,30 @@ def apply_tunnels_to_devices(
                 for interface in response['interfaces']
             }
 
+            existing_phase1 = _extract_existing_phase1_ikeids(
+                child.call(get_ip_sec_phases.sync)
+            )
+
+            created_count = 0
+            skipped_count = 0
+
             # Apply Phase 1 configurations
             for tunnel in ipsectunnelcalls[device_name]:
                 tunnel.interface = interfacestoidentity[device_name][tunnel.interface]
                 tunnel_name = str(tunnel.descr) if tunnel.descr else ""
+
+                if tunnel_name in existing_phase1:
+                    ike_id = existing_phase1[tunnel_name]
+                    tunnel_index[device_name][tunnel_name]["phase2"].ikeid = ike_id
+                    skipped_count += 1
+                    logging.info(
+                        "Phase 1 already exists for tunnel '%s' on '%s' (IKE ID %s); skipping create",
+                        tunnel_name,
+                        device_name,
+                        ike_id,
+                    )
+                    continue
+
                 logging.info(f"Applying Phase 1 for tunnel: {tunnel_name}")
                 
                 response = child.call(set_ip_sec_phase_1.sync, body=tunnel).to_dict()
@@ -121,6 +184,7 @@ def apply_tunnels_to_devices(
                 # Extract IKE ID from response
                 ike_id = response['msg'].split("Phase1 ", 1)[1].split(None, 1)[0]
                 tunnel_index[device_name][tunnel_name]["phase2"].ikeid = ike_id
+                created_count += 1
                 logging.debug(f"Assigned IKE ID {ike_id} to tunnel {tunnel_name}")
             
             # Apply Phase 2 configurations
@@ -129,7 +193,13 @@ def apply_tunnels_to_devices(
                 phase2 = tunnel_index[device_name][tunnel_name]["phase2"]
                 child.call(set_ip_sec_phase_2.sync, body=phase2)
             
-            logging.info(f"Successfully configured {len(ipsectunnelcalls[device_name])} tunnels on {device_name}")
+            logging.info(
+                "Successfully processed %s tunnels on %s (%s created, %s existing skipped)",
+                len(ipsectunnelcalls[device_name]),
+                device_name,
+                created_count,
+                skipped_count,
+            )
             
         except Exception as e:
             logging.error(f"Error applying tunnels to device {device_name}: {e}")

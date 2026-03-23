@@ -25,6 +25,7 @@ from src.devices import (  # noqa: E402
 from src.devices import (  # noqa: E402
     add_interface,
     apply_dirty_config,
+    get_ip_sec_phases,
     get_interface_descriptors,
     get_interfaces,
     set_ip_sec_phase_1,
@@ -83,7 +84,10 @@ def test_apply_tunnels_to_devices_sets_ikeid_and_phase2_calls() -> None:
     phase1_response = MagicMock()
     phase1_response.to_dict.return_value = {"msg": "Phase1 42 saved"}
 
-    child.call.side_effect = [interfaces_response, phase1_response, None]
+    existing_phases_response = MagicMock()
+    existing_phases_response.to_dict.return_value = {"data": {"phase_1": []}}
+
+    child.call.side_effect = [interfaces_response, existing_phases_response, phase1_response, None]
 
     phase1 = SimpleNamespace(interface="wan", descr="tun-a")
     phase2 = SimpleNamespace(ikeid=None)
@@ -99,7 +103,41 @@ def test_apply_tunnels_to_devices_sets_ikeid_and_phase2_calls() -> None:
 
     assert phase1.interface == "wan-id"
     assert phase2.ikeid == "42"
+    child.call.assert_any_call(get_ip_sec_phases.sync)
     child.call.assert_any_call(set_ip_sec_phase_2.sync, body=phase2)
+
+
+def test_apply_tunnels_to_devices_skips_existing_phase1() -> None:
+    child = MagicMock()
+
+    interfaces_response = MagicMock()
+    interfaces_response.to_dict.return_value = {
+        "interfaces": [{"assigned": "wan", "identity": "wan-id"}]
+    }
+
+    existing_phases_response = MagicMock()
+    existing_phases_response.to_dict.return_value = {
+        "data": {"phase_1": [{"descr": "tun-a", "ikeid": "7"}]}
+    }
+
+    child.call.side_effect = [interfaces_response, existing_phases_response, None]
+
+    phase1 = SimpleNamespace(interface="wan", descr="tun-a")
+    phase2 = SimpleNamespace(ikeid=None)
+    tunnel_index = {"fw1": {"tun-a": {"phase2": phase2}}}
+
+    apply_tunnels_to_devices(
+        device_children={"fw1": child},
+        ipsectunnelcalls={"fw1": [phase1]},
+        tunnel_index=tunnel_index,
+        dry_run=False,
+    )
+
+    assert phase1.interface == "wan-id"
+    assert phase2.ikeid == "7"
+    child.call.assert_any_call(get_ip_sec_phases.sync)
+    child.call.assert_any_call(set_ip_sec_phase_2.sync, body=phase2)
+    assert all(call.args[0] != set_ip_sec_phase_1.sync for call in child.call.call_args_list)
 
 
 def test_turn_on_ipsec_tunnels_creates_missing_ipsec_interfaces() -> None:
