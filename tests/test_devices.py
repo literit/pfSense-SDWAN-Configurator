@@ -17,6 +17,7 @@ for _mod in [
     sys.modules.setdefault(_mod, MagicMock())
 
 from src.devices import (  # noqa: E402
+    _extract_existing_ipsec_phases,
     apply_changes_to_all_devices,
     apply_tunnels_to_devices,
     build_device_children,
@@ -138,6 +139,53 @@ def test_apply_tunnels_to_devices_skips_existing_phase1() -> None:
     child.call.assert_any_call(get_ip_sec_phases.sync)
     child.call.assert_any_call(set_ip_sec_phase_2.sync, body=phase2)
     assert all(call.args[0] != set_ip_sec_phase_1.sync for call in child.call.call_args_list)
+
+
+def test_apply_tunnels_to_devices_skips_existing_phase2() -> None:
+    child = MagicMock()
+
+    interfaces_response = MagicMock()
+    interfaces_response.to_dict.return_value = {
+        "interfaces": [{"assigned": "wan", "identity": "wan-id"}]
+    }
+
+    existing_phases_response = MagicMock()
+    existing_phases_response.to_dict.return_value = {
+        "phase1": [{"descr": "tun-a", "ikeid": "7"}],
+        "phase2": [{"descr": "tun-a", "ikeid": "7", "uniqid": "abc"}],
+    }
+
+    child.call.side_effect = [interfaces_response, existing_phases_response]
+
+    phase1 = SimpleNamespace(interface="wan", descr="tun-a")
+    phase2 = SimpleNamespace(ikeid=None)
+    tunnel_index = {"fw1": {"tun-a": {"phase2": phase2}}}
+
+    apply_tunnels_to_devices(
+        device_children={"fw1": child},
+        ipsectunnelcalls={"fw1": [phase1]},
+        tunnel_index=tunnel_index,
+        dry_run=False,
+    )
+
+    assert phase1.interface == "wan-id"
+    assert phase2.ikeid == "7"
+    assert all(call.args[0] != set_ip_sec_phase_1.sync for call in child.call.call_args_list)
+    assert all(call.args[0] != set_ip_sec_phase_2.sync for call in child.call.call_args_list)
+
+
+def test_extract_existing_ipsec_phases_returns_normalized_phase_list() -> None:
+    response = {
+        "phase1": [{"descr": "tun-a", "ikeid": "7"}],
+        "phase2": [{"descr": "tun-a", "ikeid": "7", "uniqid": "abc"}],
+    }
+
+    existing = _extract_existing_ipsec_phases(response)
+
+    assert existing == [
+        {"phase": "phase1", "descr": "tun-a", "ikeid": "7", "uniqid": ""},
+        {"phase": "phase2", "descr": "tun-a", "ikeid": "7", "uniqid": "abc"},
+    ]
 
 
 def test_turn_on_ipsec_tunnels_creates_missing_ipsec_interfaces() -> None:

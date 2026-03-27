@@ -34,15 +34,15 @@ def _extract_interface_assigned(interface_response: Any) -> Optional[str]:
     return None
 
 
-def _extract_existing_phase1_ikeids(phases_response: Any) -> Dict[str, str]:
-    """Extracts existing Phase 1 tunnel names mapped to IKE IDs from API response."""
+def _extract_existing_ipsec_phases(phases_response: Any) -> List[Dict[str, str]]:
+    """Extracts normalized existing IPSec Phase 1/2 entries from API response."""
     response_dict = (
         phases_response.to_dict()
         if hasattr(phases_response, "to_dict")
         else phases_response
     )
     if not isinstance(response_dict, dict):
-        return {}
+        return []
 
     candidates: List[Any] = []
     data = response_dict.get("data")
@@ -50,29 +50,36 @@ def _extract_existing_phase1_ikeids(phases_response: Any) -> Dict[str, str]:
         candidates.append(data)
     candidates.append(response_dict)
 
-    existing: Dict[str, str] = {}
-    list_keys = ("phase_1", "phase1", "phase_1s", "phase1s")
+    existing: List[Dict[str, str]] = []
+    phase_keys = {
+        "phase1": ("phase_1", "phase1", "phase_1s", "phase1s"),
+        "phase2": ("phase_2", "phase2", "phase_2s", "phase2s"),
+    }
 
     for container in candidates:
-        for key in list_keys:
-            phase1_list = container.get(key)
-            if not isinstance(phase1_list, list):
-                continue
-
-            for item in phase1_list:
-                item_dict = item.to_dict() if hasattr(item, "to_dict") else item
-                if not isinstance(item_dict, dict):
+        for phase_type, keys in phase_keys.items():
+            for key in keys:
+                phase_list = container.get(key)
+                if not isinstance(phase_list, list):
                     continue
 
-                descr = item_dict.get("descr")
-                ikeid = item_dict.get("ikeid") or item_dict.get("ike_id")
-                if descr is None or ikeid is None:
-                    continue
+                for item in phase_list:
+                    item_dict = item.to_dict() if hasattr(item, "to_dict") else item
+                    if not isinstance(item_dict, dict):
+                        continue
 
-                descr_str = str(descr).strip()
-                ikeid_str = str(ikeid).strip()
-                if descr_str and ikeid_str:
-                    existing[descr_str] = ikeid_str
+                    descr = item_dict.get("descr")
+                    ikeid = item_dict.get("ikeid") or item_dict.get("ike_id")
+                    uniqid = item_dict.get("uniqid")
+
+                    normalized = {
+                        "phase": phase_type,
+                        "descr": str(descr).strip() if descr is not None else "",
+                        "ikeid": str(ikeid).strip() if ikeid is not None else "",
+                        "uniqid": str(uniqid).strip() if uniqid is not None else "",
+                    }
+                    if normalized["descr"] or normalized["ikeid"] or normalized["uniqid"]:
+                        existing.append(normalized)
 
     return existing
 
@@ -153,9 +160,24 @@ def apply_tunnels_to_devices(
                 for interface in response['interfaces']
             }
 
-            existing_phase1 = _extract_existing_phase1_ikeids(
+            existing_phases = _extract_existing_ipsec_phases(
                 child.call(get_ip_sec_phases.sync)
             )
+            existing_phase1_ikeids = {
+                phase["descr"]: phase["ikeid"]
+                for phase in existing_phases
+                if phase.get("phase") == "phase1" and phase.get("descr") and phase.get("ikeid")
+            }
+            existing_phase2_by_descr_ikeid = {
+                (phase["descr"], phase["ikeid"])
+                for phase in existing_phases
+                if phase.get("phase") == "phase2" and phase.get("descr") and phase.get("ikeid")
+            }
+            existing_phase2_descr_only = {
+                phase["descr"]
+                for phase in existing_phases
+                if phase.get("phase") == "phase2" and phase.get("descr")
+            }
 
             created_count = 0
             skipped_count = 0
@@ -165,8 +187,8 @@ def apply_tunnels_to_devices(
                 tunnel.interface = interfacestoidentity[device_name][tunnel.interface]
                 tunnel_name = str(tunnel.descr) if tunnel.descr else ""
 
-                if tunnel_name in existing_phase1:
-                    ike_id = existing_phase1[tunnel_name]
+                if tunnel_name in existing_phase1_ikeids:
+                    ike_id = existing_phase1_ikeids[tunnel_name]
                     tunnel_index[device_name][tunnel_name]["phase2"].ikeid = ike_id
                     skipped_count += 1
                     logging.info(
@@ -189,8 +211,20 @@ def apply_tunnels_to_devices(
             
             # Apply Phase 2 configurations
             for tunnel_name in tunnel_index[device_name]:
-                logging.info(f"Applying Phase 2 for tunnel: {tunnel_name}")
                 phase2 = tunnel_index[device_name][tunnel_name]["phase2"]
+                phase2_ikeid = str(getattr(phase2, "ikeid", "")).strip()
+
+                if (tunnel_name, phase2_ikeid) in existing_phase2_by_descr_ikeid or (
+                    not phase2_ikeid and tunnel_name in existing_phase2_descr_only
+                ):
+                    logging.info(
+                        "Phase 2 already exists for tunnel '%s' on '%s'; skipping create",
+                        tunnel_name,
+                        device_name,
+                    )
+                    continue
+
+                logging.info(f"Applying Phase 2 for tunnel: {tunnel_name}")
                 child.call(set_ip_sec_phase_2.sync, body=phase2)
             
             logging.info(
