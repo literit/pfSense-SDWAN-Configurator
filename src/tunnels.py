@@ -124,6 +124,7 @@ def build_ipsec_tunnels(
 
                     ipsectunnels.append({
                         "tag": tag,
+                        "tunnel_id": tunnel_id,
                         "interface1": interface1,
                         "interface2": interface2,
                         "secret": utils.generate_random_password(24),
@@ -164,7 +165,8 @@ def build_tunnel_calls(
             "remote_firewall": firewall2,
             "pre_shared_key": tunnel["secret"],
             "tunnel_ip": tunnel["interface1"]["tunnel_ip"],
-            "remote_tunnel_ip": tunnel["interface2"]["tunnel_ip"]
+            "remote_tunnel_ip": tunnel["interface2"]["tunnel_ip"],
+            "tunnel_id": tunnel["tunnel_id"],
         }
         call2 = {
             "name": tunnel["interface2"]["tunnel_name"],
@@ -173,7 +175,8 @@ def build_tunnel_calls(
             "remote_firewall": firewall1,
             "pre_shared_key": tunnel["secret"],
             "tunnel_ip": tunnel["interface2"]["tunnel_ip"],
-            "remote_tunnel_ip": tunnel["interface1"]["tunnel_ip"]
+            "remote_tunnel_ip": tunnel["interface1"]["tunnel_ip"],
+            "tunnel_id": tunnel["tunnel_id"],
         }
 
         ipsectunnelsbyfirewall[firewall1].append(call1)

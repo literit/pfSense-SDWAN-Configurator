@@ -113,3 +113,60 @@ def test_main_state_file_network_mismatch_exits(monkeypatch, tmp_path) -> None:
         main.main()
 
     assert exc.value.code == 1
+
+
+def test_main_runs_cleanup_before_tunnel_apply(monkeypatch, tmp_path) -> None:
+    state_file = tmp_path / "state.pkl"
+
+    monkeypatch.setattr(
+        main,
+        "parse_args",
+        lambda: SimpleNamespace(file="config.yaml", state_file=str(state_file), dry_run=False),
+    )
+    monkeypatch.setattr(
+        main,
+        "load_config",
+        lambda _: {
+            "api_server": "10.0.0.1",
+            "api_port": 8443,
+            "firewalls": [{"name": "fw1"}],
+            "tunnels_network": "10.0.0.0/24",
+            "hint_prefix": "vpn",
+            "ipsec": {"ike": "ikev2"},
+        },
+    )
+    monkeypatch.setattr(main, "build_settings", lambda _: SimpleNamespace(CONTROLLER_URL="https://x", USER="u", PASSWORD="p"))
+    monkeypatch.setattr(main, "build_tag_interface_map", lambda _: {"wan": []})
+
+    allocator = MagicMock()
+    monkeypatch.setattr(main.TunnelIpAllocator, "init_db", MagicMock(return_value=allocator))
+
+    monkeypatch.setattr(main, "build_ipsec_tunnels", lambda *_: [])
+    monkeypatch.setattr(main, "build_tunnel_calls", lambda *_: {"fw1": []})
+    monkeypatch.setattr(main, "build_tunnel_index", lambda _: {"fw1": {}})
+    monkeypatch.setattr(main, "build_ipsec_calls", lambda *_: ({"fw1": []}, {"fw1": {}}))
+
+    session_client = MagicMock()
+    session_client.login.return_value = True
+    monkeypatch.setattr(main, "RequestClient", MagicMock(return_value=session_client))
+
+    device_children = {"fw1": MagicMock()}
+    monkeypatch.setattr(main, "build_device_children", MagicMock(return_value=device_children))
+
+    call_sequence: list[str] = []
+
+    cleanup_mock = MagicMock(side_effect=lambda *_args, **_kwargs: call_sequence.append("cleanup"))
+    apply_tunnels_mock = MagicMock(side_effect=lambda *_args, **_kwargs: call_sequence.append("apply"))
+
+    monkeypatch.setattr(main, "cleanup_previous_run_ipsec_resources", cleanup_mock)
+    monkeypatch.setattr(main, "apply_tunnels_to_devices", apply_tunnels_mock)
+    monkeypatch.setattr(main, "turn_on_ipsec_tunnels", MagicMock())
+    monkeypatch.setattr(main, "apply_changes_to_all_devices", MagicMock())
+    monkeypatch.setattr(main, "apply_gateways_to_devices", MagicMock())
+
+    main.main()
+
+    cleanup_mock.assert_called_once()
+    apply_tunnels_mock.assert_called_once()
+    assert call_sequence.index("cleanup") < call_sequence.index("apply")
+

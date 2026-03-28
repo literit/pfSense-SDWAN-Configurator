@@ -24,6 +24,7 @@ def _make_two_firewall_tag_map():
 def _make_tunnel(fw1="fw1", fw2="fw2"):
     return {
         "tag": "wan",
+        "tunnel_id": "wan:fw1:eth0|wan:fw2:eth1",
         "interface1": {
             "firewall": fw1,
             "interface": "eth0",

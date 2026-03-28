@@ -9,6 +9,7 @@ for _mod in [
     "pfapi",
     "pfapi.models",
     "pfapi.api",
+    "pfapi.api.login",
     "pfapi.api.mim",
     "pfapi.api.interfaces",
     "pfapi.api.vpn",
@@ -21,11 +22,15 @@ from src.devices import (  # noqa: E402
     apply_changes_to_all_devices,
     apply_tunnels_to_devices,
     build_device_children,
+    cleanup_previous_run_ipsec_resources,
     turn_on_ipsec_tunnels,
 )
 from src.devices import (  # noqa: E402
     add_interface,
     apply_dirty_config,
+    delete_interface,
+    delete_ip_sec_phase_1,
+    delete_ip_sec_phase_2,
     get_ip_sec_phases,
     get_interface_descriptors,
     get_interfaces,
@@ -186,6 +191,146 @@ def test_extract_existing_ipsec_phases_returns_normalized_phase_list() -> None:
         {"phase": "phase1", "descr": "tun-a", "ikeid": "7", "uniqid": ""},
         {"phase": "phase2", "descr": "tun-a", "ikeid": "7", "uniqid": "abc"},
     ]
+
+
+def test_cleanup_previous_run_ipsec_resources_deletes_in_required_order() -> None:
+    child = MagicMock()
+
+    phases_response = MagicMock()
+    phases_response.to_dict.return_value = {
+        "phase1": [
+            {"descr": "vpn_tun-a", "ikeid": "7"},
+            {"descr": "other_tun", "ikeid": "9"},
+        ],
+        "phase2": [
+            {"descr": "vpn_tun-a", "ikeid": "7", "uniqid": "abc"},
+            {"descr": "other_tun", "ikeid": "9", "uniqid": "def"},
+        ],
+    }
+
+    interfaces_response = MagicMock()
+    interfaces_response.to_dict.return_value = {
+        "interfaces": [
+            {"if": "ipsec7", "identity": "opt7", "descr": "vpn_tun-a"},
+            {"if": "ipsec9", "identity": "opt9", "descr": "other_tun"},
+        ]
+    }
+
+    child.call.side_effect = [phases_response, interfaces_response, None, None, None]
+
+    cleanup_previous_run_ipsec_resources(
+        device_children={"fw1": child},
+        hint_prefix="vpn",
+        dry_run=False,
+    )
+
+    assert child.call.call_args_list[0].args[0] == get_ip_sec_phases.sync
+    assert child.call.call_args_list[1].args[0] == get_interfaces.sync
+    assert child.call.call_args_list[2].args[0] == delete_interface.sync
+    assert child.call.call_args_list[2].kwargs == {"name": "opt7"}
+    assert child.call.call_args_list[3].args[0] == delete_ip_sec_phase_2.sync
+    assert child.call.call_args_list[3].kwargs == {"reqid": "abc"}
+    assert child.call.call_args_list[4].args[0] == delete_ip_sec_phase_1.sync
+    assert child.call.call_args_list[4].kwargs == {"ikeid": "7"}
+
+
+def test_cleanup_previous_run_ipsec_resources_deallocates_tunnel_ips() -> None:
+    child = MagicMock()
+
+    phases_response = MagicMock()
+    phases_response.to_dict.return_value = {
+        "phase1": [{"descr": "vpn_tun-a", "ikeid": "7"}],
+        "phase2": [{"descr": "vpn_tun-a", "ikeid": "7", "uniqid": "abc"}],
+    }
+
+    interfaces_response = MagicMock()
+    interfaces_response.to_dict.return_value = {
+        "interfaces": [{"if": "ipsec7", "identity": "opt7", "descr": "vpn_tun-a"}]
+    }
+
+    child.call.side_effect = [phases_response, interfaces_response, None, None, None]
+
+    allocator = MagicMock()
+    tunnel_index = {
+        "fw1": {
+            "vpn_tun-a": {"tunnel_id": "tag:fw1:wan|tag:fw2:lan"}
+        }
+    }
+
+    cleanup_previous_run_ipsec_resources(
+        device_children={"fw1": child},
+        hint_prefix="vpn",
+        tunnel_index=tunnel_index,
+        allocator=allocator,
+        dry_run=False,
+    )
+
+    allocator.dealloc.assert_called_once_with("tag:fw1:wan|tag:fw2:lan")
+
+
+def test_cleanup_previous_run_ipsec_resources_deallocates_once_per_tunnel() -> None:
+    child = MagicMock()
+
+    phases_response = MagicMock()
+    phases_response.to_dict.return_value = {
+        "phase1": [
+            {"descr": "vpn_tun-a", "ikeid": "7"},
+            {"descr": "vpn_tun-b", "ikeid": "8"},
+        ],
+        "phase2": [
+            {"descr": "vpn_tun-a", "ikeid": "7", "uniqid": "abc"},
+            {"descr": "vpn_tun-b", "ikeid": "8", "uniqid": "def"},
+        ],
+    }
+
+    interfaces_response = MagicMock()
+    interfaces_response.to_dict.return_value = {
+        "interfaces": [
+            {"if": "ipsec7", "identity": "opt7"},
+            {"if": "ipsec8", "identity": "opt8"},
+        ]
+    }
+
+    child.call.side_effect = [
+        phases_response,
+        interfaces_response,
+        None,  # delete opt7
+        None,  # delete opt8
+        None,  # delete phase2(abc)
+        None,  # delete phase2(def)
+        None,  # delete phase1(7)
+        None,  # delete phase1(8)
+    ]
+
+    allocator = MagicMock()
+    tunnel_index = {
+        "fw1": {
+            "vpn_tun-a": {"tunnel_id": "shared-tunnel-id"},
+            "vpn_tun-b": {"tunnel_id": "shared-tunnel-id"},
+        }
+    }
+
+    cleanup_previous_run_ipsec_resources(
+        device_children={"fw1": child},
+        hint_prefix="vpn",
+        tunnel_index=tunnel_index,
+        allocator=allocator,
+        dry_run=False,
+    )
+
+    allocator.dealloc.assert_called_once_with("shared-tunnel-id")
+
+
+def test_cleanup_previous_run_ipsec_resources_dry_run_skips_api_calls() -> None:
+    child = MagicMock()
+
+    cleanup_previous_run_ipsec_resources(
+        device_children={"fw1": child},
+        hint_prefix="vpn",
+        dry_run=True,
+    )
+
+    child.call.assert_not_called()
 
 
 def test_turn_on_ipsec_tunnels_creates_missing_ipsec_interfaces() -> None:

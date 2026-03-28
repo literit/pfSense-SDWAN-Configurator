@@ -232,6 +232,7 @@ def build_ipsec_calls(
             phase1, phase2 = make_ipsec_phases(tunnel, settings)
             ipsectunnelcalls[firewall].append(phase1)
             tunnel_index[firewall][tunnel["name"]]["phase2"] = phase2
+            tunnel_index[firewall][tunnel["name"]]["tunnel_id"] = tunnel.get("tunnel_id", "")
     
     logging.info("Built IPSec Phase 1 and Phase 2 configurations")
     return ipsectunnelcalls, tunnel_index

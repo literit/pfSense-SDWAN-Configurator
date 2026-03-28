@@ -5,8 +5,19 @@ import re
 from typing import Dict, Any, List, Optional
 
 from pfapi.api.mim import get_controlled_devices
-from pfapi.api.interfaces import get_interfaces, get_interface_descriptors, add_interface
-from pfapi.api.vpn import get_ip_sec_phases, set_ip_sec_phase_1, set_ip_sec_phase_2
+from pfapi.api.interfaces import (
+    get_interfaces,
+    get_interface_descriptors,
+    add_interface,
+    delete_interface,
+)
+from pfapi.api.vpn import (
+    get_ip_sec_phases,
+    set_ip_sec_phase_1,
+    set_ip_sec_phase_2,
+    delete_ip_sec_phase_1,
+    delete_ip_sec_phase_2,
+)
 from pfapi.api.system import apply_dirty_config
 from pfapi.models import Interface, ApplyDirtyConfigRequest
 
@@ -82,6 +93,156 @@ def _extract_existing_ipsec_phases(phases_response: Any) -> List[Dict[str, str]]
                         existing.append(normalized)
 
     return existing
+
+
+def _extract_existing_interfaces(interfaces_response: Any) -> List[Dict[str, str]]:
+    """Extracts normalized interface metadata from API response."""
+    response_dict = (
+        interfaces_response.to_dict()
+        if hasattr(interfaces_response, "to_dict")
+        else interfaces_response
+    )
+    if not isinstance(response_dict, dict):
+        return []
+
+    interfaces = response_dict.get("interfaces")
+    if not isinstance(interfaces, list):
+        return []
+
+    normalized_interfaces: List[Dict[str, str]] = []
+    for interface in interfaces:
+        interface_dict = interface.to_dict() if hasattr(interface, "to_dict") else interface
+        if not isinstance(interface_dict, dict):
+            continue
+
+        normalized_interfaces.append(
+            {
+                "if": str(interface_dict.get("if") or "").strip(),
+                "identity": str(interface_dict.get("identity") or "").strip(),
+                "descr": str(interface_dict.get("descr") or "").strip(),
+                "assigned": str(interface_dict.get("assigned") or "").strip(),
+            }
+        )
+
+    return normalized_interfaces
+
+
+def cleanup_previous_run_ipsec_resources(
+    device_children: Dict[str, Any],
+    hint_prefix: str,
+    tunnel_index: Optional[Dict[str, Dict[str, Any]]] = None,
+    allocator: Optional[Any] = None,
+    dry_run: bool = False,
+) -> None:
+    """Deletes IPSec resources from prior runs for the configured prefix.
+
+    Cleanup order per device is interface -> phase 2 -> phase 1 to satisfy API
+    constraints when removing existing tunnel resources. Deallocates tunnel IP
+    addresses for deleted tunnels.
+
+    Args:
+        device_children: Mapping of device names to child API clients.
+        hint_prefix: Prefix used to generate managed tunnel names.
+        tunnel_index: Optional mapping of firewall names to tunnel details for deallocation.
+        allocator: Optional IP allocator for deallocating tunnel addresses.
+        dry_run: If True, logs actions without making API calls.
+    """
+    managed_prefix = f"{hint_prefix}_"
+    tunnel_index = tunnel_index or {}
+    deallocated_tunnel_ids: set[str] = set()
+
+    for device_name, child in device_children.items():
+        logging.info("Cleaning previous managed IPSec resources on device: %s", device_name)
+
+        if dry_run:
+            logging.info(
+                "[DRY RUN] Would delete interfaces/phase2/phase1 on %s matching prefix '%s'",
+                device_name,
+                managed_prefix,
+            )
+            continue
+
+        existing_phases = _extract_existing_ipsec_phases(child.call(get_ip_sec_phases.sync))
+        managed_phase1 = [
+            phase
+            for phase in existing_phases
+            if phase.get("phase") == "phase1"
+            and phase.get("descr", "").startswith(managed_prefix)
+            and phase.get("ikeid")
+        ]
+        managed_phase2 = [
+            phase
+            for phase in existing_phases
+            if phase.get("phase") == "phase2"
+            and phase.get("descr", "").startswith(managed_prefix)
+            and phase.get("uniqid")
+        ]
+
+        managed_ipsec_if_names = {
+            f"ipsec{phase['ikeid']}"
+            for phase in managed_phase1
+            if phase.get("ikeid")
+        }
+
+        existing_interfaces = _extract_existing_interfaces(child.call(get_interfaces.sync))
+        interface_identity_by_if = {
+            interface["if"]: interface["identity"]
+            for interface in existing_interfaces
+            if interface.get("if") and interface.get("identity")
+        }
+        managed_interface_identities = {
+            identity
+            for if_name, identity in interface_identity_by_if.items()
+            if if_name in managed_ipsec_if_names
+        }
+
+        for identity in sorted(managed_interface_identities):
+            logging.info(
+                "Deleting managed interface '%s' on '%s'",
+                identity,
+                device_name,
+            )
+            child.call(delete_interface.sync, name=identity)
+
+        for phase2 in managed_phase2:
+            reqid = phase2["uniqid"]
+            logging.info(
+                "Deleting managed Phase 2 '%s' (reqid=%s) on '%s'",
+                phase2.get("descr", ""),
+                reqid,
+                device_name,
+            )
+            child.call(delete_ip_sec_phase_2.sync, reqid=reqid)
+
+        for phase1 in managed_phase1:
+            ikeid = phase1["ikeid"]
+            tunnel_name = phase1.get("descr", "")
+            logging.info(
+                "Deleting managed Phase 1 '%s' (ikeid=%s) on '%s'",
+                tunnel_name,
+                ikeid,
+                device_name,
+            )
+            child.call(delete_ip_sec_phase_1.sync, ikeid=ikeid)
+
+            if allocator and tunnel_name in tunnel_index.get(device_name, {}):
+                tunnel_id = tunnel_index[device_name][tunnel_name].get("tunnel_id")
+                if tunnel_id and tunnel_id not in deallocated_tunnel_ids:
+                    allocator.dealloc(tunnel_id)
+                    deallocated_tunnel_ids.add(tunnel_id)
+                    logging.info(
+                        "Deallocated tunnel IP addresses for tunnel '%s' (tunnel_id=%s)",
+                        tunnel_name,
+                        tunnel_id,
+                    )
+
+        logging.info(
+            "Cleanup completed on %s: %d interface(s), %d phase2, %d phase1 deleted",
+            device_name,
+            len(managed_interface_identities),
+            len(managed_phase2),
+            len(managed_phase1),
+        )
 
 
 def build_device_children(sessionClient: Any) -> Dict[str, Any]:
